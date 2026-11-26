@@ -640,6 +640,7 @@
     let shiftsData = createEmptyShifts();
     let activeShiftName = 'Shift 1';
     let activeShiftHours = '07:00 - 15:00 WIB';
+    let espShiftSyncedAt = 0;
     let logs = [];
     let lastLogsSignature = '';
     let lastBackendStatus = '';
@@ -780,19 +781,26 @@
       document.getElementById('live-clock').innerText = timeStr + ' WIB';
       document.getElementById('live-date').innerText = dateStr;
 
-      const shiftInfo = detectCurrentShiftWIB();
-      activeShiftName = shiftInfo.name;
-      activeShiftHours = shiftInfo.hours;
+      if (!espShiftSyncedAt || (Date.now() - espShiftSyncedAt > 60000)) {
+        const shiftInfo = detectCurrentShiftWIB();
+        activeShiftName = shiftInfo.name;
+        activeShiftHours = shiftInfo.hours;
+      }
       updateShiftCardsUI();
     }
 
     function updateShiftCardsUI() {
       const shiftInfo = detectCurrentShiftWIB();
       const currentShift = activeShiftName || shiftInfo.name;
+      const shiftShortHoursMap = {
+        'Shift 1': '07:00–15:00 WIB',
+        'Shift 2': '15:00–23:00 WIB',
+        'Shift 3': '23:00–07:00 WIB'
+      };
 
       // Update Header & Status Bar Shift Indicator
       document.getElementById('nav-shift-name').innerText = currentShift.toUpperCase() + ' AKTIF';
-      document.getElementById('nav-shift-hours').innerText = shiftInfo.shortHours;
+      document.getElementById('nav-shift-hours').innerText = shiftShortHoursMap[currentShift] || shiftInfo.shortHours;
       document.getElementById('status-shift-pill').innerText = `${currentShift} Aktif`;
       document.getElementById('summary-active-shift').innerText = `${currentShift} (${activeShiftHours || shiftInfo.hours})`;
 
@@ -880,7 +888,7 @@
       alarmModalDismissedForStreak = true;
     }
 
-    // Matikan alarm saja di web TANPA menghapus data counter maupun tabel log
+    // Matikan alarm saja di web TANPA menghapus data counter maupun tabel log (+ kirim perintah MUTE ke ESP32)
     async function acknowledgeAlarmOnly() {
       dismissAlarm5xModal();
       stopBackendValidationAnimation();
@@ -896,13 +904,22 @@
       updateConsecutiveAlarmUI(0, lastBackendStatus);
       saveLocalStateCache();
 
+      let sentViaBackend = false;
       if (!IS_CLOUD_WEB) {
         try {
-          await fetch(`${API_BASE}/api/ack_alarm`, { method: 'POST', cache: 'no-store' });
+          const res = await fetch(`${API_BASE}/api/ack_alarm`, { method: 'POST', cache: 'no-store' });
+          if (res.ok) {
+            const result = await res.json().catch(() => ({}));
+            sentViaBackend = Boolean(result.mqtt_cmd_sent);
+          }
         } catch (err) {}
       }
 
-      showToast('Alarm berhasil dimatikan. Data counter, rekap shift & riwayat log tetap tersimpan.', 'info');
+      if (!sentViaBackend) {
+        publishMqttCommand('MUTE');
+      }
+
+      showToast('Perintah MUTE dikirim ke ESP32 & alarm dimatikan. Data counter, rekap shift & riwayat log tetap tersimpan.', 'info');
     }
 
     function updateConsecutiveAlarmUI(streakCount, statusStr = '') {
@@ -1232,14 +1249,50 @@
     const HIVEMQ_WS_URL = `wss://${HIVEMQ_HOST}:${HIVEMQ_WS_PORT}/mqtt`;
     const MQTT_USERNAME = 'otomatisasi_sampling';
     const MQTT_PASSWORD = 'sampling123';
-    const MQTT_TOPIC = 'otomatis_sampling/qc/sampling';
-    const MQTT_STATUS_TOPIC = 'otomatis_sampling/qc/status';
+    const MQTT_TOPIC = 'otomatisasi_sampling/qc/sampling';
+    const MQTT_CMD_TOPIC = 'otomatisasi_sampling/qc/cmd';
+    const MQTT_STATUS_TOPIC = 'otomatisasi_sampling/qc/status';
+
+    // Alias kompatibilitas topik (jika ESP32 masih memakai prefix lama otomatis_sampling/qc/*)
+    const MQTT_TOPIC_ALIASES = [MQTT_TOPIC, 'otomatis_sampling/qc/sampling'];
+    const MQTT_CMD_TOPIC_ALIASES = [MQTT_CMD_TOPIC, 'otomatis_sampling/qc/cmd'];
+    const MQTT_STATUS_TOPIC_ALIASES = [MQTT_STATUS_TOPIC, 'otomatis_sampling/qc/status'];
+
+    let mqttClient = null;
+
+    function normalizeShiftFromPayload(rawShift) {
+      if (rawShift !== undefined && rawShift !== null) {
+        const text = String(rawShift).trim().toUpperCase();
+        if (text === 'SHIFT 1' || text === 'SHIFT1' || text === '1') {
+          return { name: 'Shift 1', hours: '07:00 - 15:00 WIB', shortHours: '07:00–15:00 WIB' };
+        }
+        if (text === 'SHIFT 2' || text === 'SHIFT2' || text === '2') {
+          return { name: 'Shift 2', hours: '15:00 - 23:00 WIB', shortHours: '15:00–23:00 WIB' };
+        }
+        if (text === 'SHIFT 3' || text === 'SHIFT3' || text === '3') {
+          return { name: 'Shift 3', hours: '23:00 - 07:00 WIB', shortHours: '23:00–07:00 WIB' };
+        }
+      }
+      return detectCurrentShiftWIB();
+    }
+
+    function publishMqttCommand(command) {
+      if (mqttClient && mqttClient.connected) {
+        MQTT_CMD_TOPIC_ALIASES.forEach(topic => {
+          mqttClient.publish(topic, command);
+        });
+        console.log(`[HiveMQ WebSocket CMD] Mengirim "${command}" ke ${MQTT_CMD_TOPIC_ALIASES.join(', ')}`);
+        return true;
+      }
+      console.warn(`[HiveMQ WebSocket CMD] Client belum terhubung, gagal mengirim "${command}".`);
+      return false;
+    }
 
     function initDirectMqttWebSocket() {
       if (typeof mqtt === 'undefined') return;
 
       const clientId = 'otomatisasi_sampling_web_' + Math.random().toString(16).substring(2, 10);
-      const client = mqtt.connect(HIVEMQ_WS_URL, {
+      mqttClient = mqtt.connect(HIVEMQ_WS_URL, {
         clientId: clientId,
         username: MQTT_USERNAME,
         password: MQTT_PASSWORD,
@@ -1248,15 +1301,15 @@
         connectTimeout: 10000
       });
 
-      client.on('connect', () => {
+      mqttClient.on('connect', () => {
         console.log('[HiveMQ WebSocket] Terhubung langsung ke HiveMQ Cloud!');
-        client.subscribe([MQTT_TOPIC, MQTT_STATUS_TOPIC]);
+        mqttClient.subscribe([...MQTT_TOPIC_ALIASES, ...MQTT_STATUS_TOPIC_ALIASES]);
       });
 
-      client.on('message', (topic, messageBuffer, packet) => {
+      mqttClient.on('message', (topic, messageBuffer, packet) => {
         const rawText = messageBuffer.toString().trim();
 
-        if (topic === MQTT_STATUS_TOPIC) {
+        if (MQTT_STATUS_TOPIC_ALIASES.includes(topic)) {
           if (['OFFLINE', '0', 'DISCONNECTED'].includes(rawText.toUpperCase())) {
             directEspOnline = false;
             lastDirectEspActivity = 0;
@@ -1288,7 +1341,16 @@
                 lastRawEspGagal = Number(retainedPayload.gagal) || 0;
                 if (countGagal === 0) countGagal = lastRawEspGagal;
               }
+              if ('gagal_beruntun' in retainedPayload) {
+                gagalBeruntun = Number(retainedPayload.gagal_beruntun) || 0;
+              }
+              if ('shift' in retainedPayload) {
+                const sInfo = normalizeShiftFromPayload(retainedPayload.shift);
+                activeShiftName = sInfo.name;
+                activeShiftHours = sInfo.hours;
+              }
               refreshUI();
+              updateConsecutiveAlarmUI(gagalBeruntun, retainedPayload.status || '');
             }
           } catch (e) {}
           return;
@@ -1330,31 +1392,68 @@
             return;
           }
 
-          const shiftInfo = detectCurrentShiftWIB();
+          const shiftInfo = normalizeShiftFromPayload(payload.shift);
           activeShiftName = shiftInfo.name;
           activeShiftHours = shiftInfo.hours;
+          if (payload.shift !== undefined && payload.shift !== null && String(payload.shift).trim() !== '') {
+            espShiftSyncedAt = Date.now();
+          }
 
           const rawStatus = String(payload.status || '').trim();
           const upperStatus = rawStatus.toUpperCase();
 
-          if (upperStatus.includes('RESET')) {
+          // Konfirmasi MUTE dari ESP32 (tombol fisik atau respon perintah web)
+          if (upperStatus.includes('MUTE')) {
             gagalBeruntun = 0;
-            if (inBerhasil !== null) lastRawEspBerhasil = inBerhasil;
-            if (inGagal !== null) lastRawEspGagal = inGagal;
+            if (inBerhasil !== null) {
+              lastRawEspBerhasil = inBerhasil;
+              countBerhasil = inBerhasil;
+            }
+            if (inGagal !== null) {
+              lastRawEspGagal = inGagal;
+              countGagal = inGagal;
+            }
             stopBackendValidationAnimation();
-            setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+            lastBackendStatus = 'STANDBY — MENUNGGU KELIPATAN 100';
+            setStatusBanner('STANDBY', lastBackendStatus);
             document.getElementById('validation-bar').style.width = '0%';
             document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
-            updateConsecutiveAlarmUI(0, 'STANDBY — MENUNGGU KELIPATAN 100');
+            updateConsecutiveAlarmUI(0, lastBackendStatus);
+            saveLocalStateCache();
+            refreshUI();
+            return;
+          }
+
+          if (upperStatus.includes('RESET')) {
+            gagalBeruntun = 0;
+            if (inBerhasil !== null) {
+              lastRawEspBerhasil = inBerhasil;
+              if (!upperStatus.includes('SHIFT')) countBerhasil = inBerhasil;
+            }
+            if (inGagal !== null) {
+              lastRawEspGagal = inGagal;
+              if (!upperStatus.includes('SHIFT')) countGagal = inGagal;
+            }
+            stopBackendValidationAnimation();
+            lastBackendStatus = 'STANDBY — MENUNGGU KELIPATAN 100';
+            setStatusBanner('STANDBY', lastBackendStatus);
+            document.getElementById('validation-bar').style.width = '0%';
+            document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+            updateConsecutiveAlarmUI(0, lastBackendStatus);
             saveLocalStateCache();
             refreshUI();
             return;
           }
 
           if (['STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100'].includes(upperStatus)) {
+            if ('gagal_beruntun' in payload) {
+              gagalBeruntun = Number(payload.gagal_beruntun) || 0;
+            }
             if (gagalBeruntun < BATAS_GAGAL_ALARM) {
               setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
             }
+            updateConsecutiveAlarmUI(gagalBeruntun, rawStatus);
+            refreshUI();
             return;
           }
 
@@ -1417,6 +1516,11 @@
               refreshUI();
               addLogEntry(true, '0.85', 'Terdeteksi ESP32', activeShiftName);
               animateBackendValidationWindow('OK', 'SAMPLE TERDETEKSI — OK!', cycleNum, 0);
+            } else {
+              refreshUI();
+              setStatusBanner('OK', 'SAMPLE TERDETEKSI — OK!');
+              updateConsecutiveAlarmUI(0, 'SAMPLE TERDETEKSI — OK!');
+              saveLocalStateCache();
             }
           } else if (isFailEvent) {
             if ('gagal_beruntun' in payload) {
@@ -1424,15 +1528,28 @@
             } else if (shouldLog && cycleNum > 0) {
               gagalBeruntun += 1;
             }
+            const failStatus = gagalBeruntun >= BATAS_GAGAL_ALARM
+              ? `ALARM 24V AKTIF: ${gagalBeruntun}x GAGAL BERTURUT-TURUT — CORONG MACET!`
+              : `GAGAL (${gagalBeruntun}/${BATAS_GAGAL_ALARM}) — TIMEOUT 3.0s`;
             if (shouldLog && cycleNum > 0) {
               shiftsData[activeShiftName].gagal += Math.max(1, deltaG);
               refreshUI();
               addLogEntry(false, '3.00', `Timeout (>3.0s) — Gagal Beruntun ${gagalBeruntun}/${BATAS_GAGAL_ALARM}`, activeShiftName);
-              const failStatus = gagalBeruntun >= BATAS_GAGAL_ALARM
-                ? `ALARM 24V AKTIF: ${gagalBeruntun}x GAGAL BERTURUT-TURUT — CORONG MACET!`
-                : `GAGAL (${gagalBeruntun}/${BATAS_GAGAL_ALARM}) — TIMEOUT 3.0s`;
               animateBackendValidationWindow('FAIL', failStatus, cycleNum, gagalBeruntun);
+            } else {
+              refreshUI();
+              setStatusBanner('FAIL', failStatus);
+              updateConsecutiveAlarmUI(gagalBeruntun, failStatus);
+              saveLocalStateCache();
             }
+          } else if (rawStatus) {
+            if ('gagal_beruntun' in payload) {
+              gagalBeruntun = Number(payload.gagal_beruntun) || 0;
+            }
+            setStatusBanner('STANDBY', rawStatus);
+            updateConsecutiveAlarmUI(gagalBeruntun, rawStatus);
+            refreshUI();
+            saveLocalStateCache();
           }
         } catch (err) {
           console.error('[HiveMQ WebSocket JSON Error]:', err);
@@ -1693,10 +1810,19 @@
       if (resetTimeoutId) clearTimeout(resetTimeoutId);
       isValidating = false;
 
+      let sentViaBackend = false;
       if (!IS_CLOUD_WEB) {
         try {
-          await fetch(`${API_BASE}/api/reset`, { method: 'POST', cache: 'no-store' });
+          const res = await fetch(`${API_BASE}/api/reset`, { method: 'POST', cache: 'no-store' });
+          if (res.ok) {
+            const result = await res.json().catch(() => ({}));
+            sentViaBackend = Boolean(result.mqtt_cmd_sent);
+          }
         } catch (err) {}
+      }
+
+      if (!sentViaBackend) {
+        publishMqttCommand('RESET');
       }
 
       countBerhasil = 0;

@@ -14,7 +14,8 @@ const char* mqtt_server   = "311c949a8e4d44afb405b9efa6f0a4e4.s1.eu.hivemq.cloud
 const int   mqtt_port     = 8883;
 const char* mqtt_user     = "otomatisasi_sampling";
 const char* mqtt_password = "sampling123";
-const char* mqtt_topic    = "otomatis_sampling/qc/sampling";
+const char* mqtt_topic    = "otomatisasi_sampling/qc/sampling";
+const char* mqtt_cmd_topic= "otomatisasi_sampling/qc/cmd";
 
 // ================= KONFIGURASI WAKTU (WIB / UTC+7) =================
 const char* ntpServer          = "pool.ntp.org";
@@ -51,7 +52,7 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 int counterBerhasil = 0;
 int counterGagal = 0;
 int gagalBeruntun = 0;
-const int BATAS_GAGAL_ALARM = 2; // Sinyal peringatan / alarm nyala jika gagal >= 2 kali beruntun
+const int BATAS_GAGAL_ALARM = 2; // Alarm nyala jika gagal >= 2 kali beruntun
 String statusSaatIni = "STANDBY";
 
 // State Shift (SHIFT 1 / SHIFT 2 / SHIFT 3)
@@ -84,6 +85,12 @@ const unsigned long BUTTON_DEBOUNCE_MS      = 80;
 
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
+
+// Deklarasi fungsi yang dipanggil di callback
+void setAlarm(bool aktif);
+void perbaruiAngkaLCD();
+void perbaruiStatusBawah(String pesan, uint16_t warna);
+void kirimEventSiklus(String statusTeks);
 
 // ================= PENENTUAN SHIFT BERDASARKAN JAM WIB =================
 String deteksiShiftWIB(int jam) {
@@ -150,6 +157,40 @@ void kirimEventSiklus(String statusTeks) {
   }
 }
 
+// ================= CALLBACK PERINTAH DARI WEB =================
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String pesan = "";
+  for (unsigned int i = 0; i < length; i++) {
+    pesan += (char)payload[i];
+  }
+  pesan.trim();
+
+  Serial.print("[MQTT CMD] ");
+  Serial.print(topic);
+  Serial.print(" -> ");
+  Serial.println(pesan);
+
+  if (pesan.equalsIgnoreCase("MUTE") || pesan.equalsIgnoreCase("MATIKAN_ALARM")) {
+    gagalBeruntun = 0;
+    statusSaatIni = "STANDBY";
+    setAlarm(false);
+    perbaruiStatusBawah("ALARM MATI DARI WEB", WARNA_KUNING);
+    resetMessageUntil = millis() + 1500;
+    kirimEventSiklus("MUTE WEB");
+  } else if (pesan.equalsIgnoreCase("RESET") || pesan.equalsIgnoreCase("RESET_COUNTER")) {
+    counterBerhasil = 0;
+    counterGagal = 0;
+    gagalBeruntun = 0;
+    windowAktif = false;
+    statusSaatIni = "STANDBY";
+    setAlarm(false);
+    perbaruiAngkaLCD();
+    perbaruiStatusBawah("RESET DARI WEB", WARNA_KUNING);
+    resetMessageUntil = millis() + 1500;
+    kirimEventSiklus("RESET MANUAL");
+  }
+}
+
 // ================= KONEKSI MQTT NON-BLOCKING =================
 void handleMQTT() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -170,6 +211,9 @@ void handleMQTT() {
       if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
         Serial.println(" [MQTT] Terhubung!");
         lastMqttReconnectAttempt = 0;
+        client.subscribe(mqtt_cmd_topic);
+        Serial.print("[MQTT SUB] ");
+        Serial.println(mqtt_cmd_topic);
         kirimHeartbeat();
       } else {
         Serial.print(" Gagal, rc=");
@@ -355,6 +399,7 @@ void setup() {
 
   espClient.setInsecure();
   client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(mqttCallback);
 
   tampilkanDashboardLCD();
 }

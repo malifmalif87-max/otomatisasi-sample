@@ -65,6 +65,7 @@ BATAS_GAGAL_ALARM = 2
 
 # Timestamp terakhir kali ESP32 mengirim data/pesan
 last_esp_activity = 0
+last_esp_shift_sync = 0
 esp_uses_heartbeat = False
 
 # Menyimpan nilai counter mentah terakhir dari ESP32 untuk mendeteksi perubahan sinyal sensor nyata
@@ -118,8 +119,44 @@ MQTT_WS_PORT = int(os.environ.get("MQTT_WS_PORT", "8884"))
 MQTT_WS_URL = os.environ.get("MQTT_WS_URL", f"wss://{MQTT_BROKER}:{MQTT_WS_PORT}/mqtt")
 MQTT_USER = os.environ.get("MQTT_USERNAME", "otomatisasi_sampling")
 MQTT_PASS = os.environ.get("MQTT_PASSWORD", "sampling123")
-MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "otomatis_sampling/qc/sampling")
-MQTT_STATUS_TOPIC = os.environ.get("MQTT_STATUS_TOPIC", "otomatis_sampling/qc/status")
+MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "otomatisasi_sampling/qc/sampling")
+MQTT_CMD_TOPIC = os.environ.get("MQTT_CMD_TOPIC", "otomatisasi_sampling/qc/cmd")
+MQTT_STATUS_TOPIC = os.environ.get("MQTT_STATUS_TOPIC", "otomatisasi_sampling/qc/status")
+
+# Alias kompatibilitas topik (jika ESP32 masih memakai prefix lama otomatis_sampling/qc/*)
+MQTT_TOPIC_ALIASES = tuple(dict.fromkeys([MQTT_TOPIC, "otomatis_sampling/qc/sampling"]))
+MQTT_CMD_TOPIC_ALIASES = tuple(dict.fromkeys([MQTT_CMD_TOPIC, "otomatis_sampling/qc/cmd"]))
+MQTT_STATUS_TOPIC_ALIASES = tuple(dict.fromkeys([MQTT_STATUS_TOPIC, "otomatis_sampling/qc/status"]))
+
+SHIFT_HOURS_MAP = {
+    "Shift 1": "07:00 - 15:00 WIB",
+    "Shift 2": "15:00 - 23:00 WIB",
+    "Shift 3": "23:00 - 07:00 WIB",
+}
+
+def normalize_shift_info(raw_shift, fallback_dt=None):
+    if raw_shift is not None:
+        text = str(raw_shift).strip().upper()
+        if text in ("SHIFT 1", "SHIFT1", "1"):
+            return "Shift 1", SHIFT_HOURS_MAP["Shift 1"]
+        if text in ("SHIFT 2", "SHIFT2", "2"):
+            return "Shift 2", SHIFT_HOURS_MAP["Shift 2"]
+        if text in ("SHIFT 3", "SHIFT3", "3"):
+            return "Shift 3", SHIFT_HOURS_MAP["Shift 3"]
+    return get_current_shift_info(fallback_dt)
+
+def publish_mqtt_command(command):
+    """Kirim perintah kontrol dua arah (MUTE / RESET) ke ESP32 via topik MQTT cmd."""
+    sent = False
+    try:
+        for topic in MQTT_CMD_TOPIC_ALIASES:
+            info = mqtt_client.publish(topic, command)
+            if info.rc == mqtt.MQTT_ERR_SUCCESS:
+                sent = True
+        print(f"[MQTT CMD] Perintah '{command}' dikirim ke {', '.join(MQTT_CMD_TOPIC_ALIASES)}")
+    except Exception as e:
+        print(f"[MQTT CMD ERROR] Gagal mengirim '{command}': {e}")
+    return sent
 
 # ================= CALLBACK MQTT =================
 def on_connect(client, userdata, flags, rc):
@@ -127,8 +164,10 @@ def on_connect(client, userdata, flags, rc):
         if rc == 0:
             print("[MQTT] Berhasil terhubung ke HiveMQ Cloud!")
             data_state["koneksi_mqtt"] = True
-            client.subscribe(MQTT_TOPIC)
-            client.subscribe(MQTT_STATUS_TOPIC)
+            for topic in MQTT_TOPIC_ALIASES:
+                client.subscribe(topic)
+            for topic in MQTT_STATUS_TOPIC_ALIASES:
+                client.subscribe(topic)
         else:
             print(f"[MQTT] Gagal terhubung. Kode RC: {rc}")
             data_state["koneksi_mqtt"] = False
@@ -140,11 +179,11 @@ def on_disconnect(client, userdata, rc):
         data_state["esp_online"] = False
 
 def on_message(client, userdata, msg):
-    global last_esp_activity, esp_uses_heartbeat, last_raw_berhasil, last_raw_gagal
+    global last_esp_activity, last_esp_shift_sync, esp_uses_heartbeat, last_raw_berhasil, last_raw_gagal
     raw_text = msg.payload.decode(errors="ignore").strip()
 
     # 1. Jika pesan masuk dari topik status/heartbeat khusus (MQTT_STATUS_TOPIC)
-    if msg.topic == MQTT_STATUS_TOPIC:
+    if msg.topic in MQTT_STATUS_TOPIC_ALIASES:
         with state_lock:
             if raw_text.upper() in ["OFFLINE", "0", "DISCONNECTED"]:
                 last_esp_activity = 0
@@ -169,6 +208,12 @@ def on_message(client, userdata, msg):
                     if "gagal" in payload and last_raw_gagal is None:
                         last_raw_gagal = int(payload["gagal"])
                         data_state["gagal"] = last_raw_gagal
+                    if "gagal_beruntun" in payload:
+                        data_state["gagal_beruntun"] = int(payload["gagal_beruntun"])
+                    if "shift" in payload:
+                        s_name, s_jam = normalize_shift_info(payload.get("shift"))
+                        data_state["shift_aktif"] = s_name
+                        data_state["jam_shift_aktif"] = s_jam
         except Exception:
             pass
         print("[MQTT] Pesan retained diterima (log lama diabaikan).")
@@ -220,15 +265,17 @@ def on_message(client, userdata, msg):
 
             now_wib = get_wib_now()
             waktu_sekarang = now_wib.strftime("%H:%M:%S")
-            shift_aktif, jam_shift = get_current_shift_info(now_wib)
+            shift_aktif, jam_shift = normalize_shift_info(payload.get("shift"), now_wib)
             data_state["shift_aktif"] = shift_aktif
             data_state["jam_shift_aktif"] = jam_shift
+            if payload.get("shift") is not None and str(payload.get("shift")).strip():
+                last_esp_shift_sync = time.time()
 
             raw_status = str(payload.get("status", "")).strip()
             upper_status = raw_status.upper()
 
-            # 4. Saat menerima status RESET MANUAL dari ESP32, reset gagal_beruntun & kembalikan status ke STANDBY
-            if "RESET" in upper_status:
+            # 4a. Saat menerima status MUTE dari ESP32 (tombol fisik atau konfirmasi perintah web), matikan alarm tanpa menghapus data
+            if "MUTE" in upper_status:
                 data_state["status"] = "STANDBY — MENUNGGU KELIPATAN 100"
                 data_state["gagal_beruntun"] = 0
                 if in_berhasil is not None:
@@ -238,7 +285,23 @@ def on_message(client, userdata, msg):
                     last_raw_gagal = in_gagal
                     data_state["gagal"] = in_gagal
                 save_state_cache()
-                print("[MQTT RESET MANUAL] Alarm 24V di-reset, status kembali STANDBY.")
+                print("[MQTT MUTE] Alarm 24V dimatikan (MUTE), counter & log tetap tersimpan.")
+                return
+
+            # 4b. Saat menerima status RESET dari ESP32, reset gagal_beruntun & kembalikan status ke STANDBY
+            if "RESET" in upper_status:
+                data_state["status"] = "STANDBY — MENUNGGU KELIPATAN 100"
+                data_state["gagal_beruntun"] = 0
+                if in_berhasil is not None:
+                    last_raw_berhasil = in_berhasil
+                    if "SHIFT" not in upper_status:
+                        data_state["berhasil"] = in_berhasil
+                if in_gagal is not None:
+                    last_raw_gagal = in_gagal
+                    if "SHIFT" not in upper_status:
+                        data_state["gagal"] = in_gagal
+                save_state_cache()
+                print(f"[MQTT RESET] Status '{raw_status}' diterima, kembali STANDBY.")
                 return
 
             # Jika ESP32 mengirim status STANDBY biasa, jangan reset gagal_beruntun yang sudah tercatat
@@ -357,9 +420,10 @@ def check_esp_timeout():
     while True:
         time.sleep(2)
         with state_lock:
-            shift_aktif, jam_shift = get_current_shift_info()
-            data_state["shift_aktif"] = shift_aktif
-            data_state["jam_shift_aktif"] = jam_shift
+            if not last_esp_shift_sync or (time.time() - last_esp_shift_sync) > 60:
+                shift_aktif, jam_shift = get_current_shift_info()
+                data_state["shift_aktif"] = shift_aktif
+                data_state["jam_shift_aktif"] = jam_shift
             if esp_uses_heartbeat and last_esp_activity > 0 and (time.time() - last_esp_activity) > 15:
                 data_state["esp_online"] = False
 
@@ -404,9 +468,10 @@ def index():
 def get_data():
     # Mengembalikan status data termasuk shift aktif & rekap 3 shift terkini
     with state_lock:
-        shift_aktif, jam_shift = get_current_shift_info()
-        data_state["shift_aktif"] = shift_aktif
-        data_state["jam_shift_aktif"] = jam_shift
+        if not last_esp_shift_sync or (time.time() - last_esp_shift_sync) > 60:
+            shift_aktif, jam_shift = get_current_shift_info()
+            data_state["shift_aktif"] = shift_aktif
+            data_state["jam_shift_aktif"] = jam_shift
         return jsonify(data_state)
 
 @app.route('/api/update', methods=['POST'])
@@ -458,7 +523,8 @@ def ack_alarm():
         data_state["gagal_beruntun"] = 0
         data_state["status"] = "STANDBY — MENUNGGU KELIPATAN 100"
         save_state_cache()
-    return jsonify({"status": "alarm_acknowledged", "data": data_state})
+    mqtt_sent = publish_mqtt_command("MUTE")
+    return jsonify({"status": "alarm_acknowledged", "mqtt_cmd_sent": mqtt_sent, "data": data_state})
 
 @app.route('/api/reset', methods=['POST'])
 def reset_data():
@@ -476,7 +542,8 @@ def reset_data():
         last_raw_berhasil = 0
         last_raw_gagal = 0
         save_state_cache()
-    return jsonify({"status": "reset", "data": data_state})
+    mqtt_sent = publish_mqtt_command("RESET")
+    return jsonify({"status": "reset", "mqtt_cmd_sent": mqtt_sent, "data": data_state})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
