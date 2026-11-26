@@ -1,0 +1,1760 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SCADA - Automated QC Sampling Monitor (3-Shift)</title>
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- MQTT.js via CDN (Direct WebSocket connection to HiveMQ Cloud for Vercel / GitHub Pages & Web) -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            slate: {
+              850: '#151e32',
+              900: '#0f172a',
+              950: '#090d16',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #090d16;
+      color: #f8fafc;
+      background-image: radial-gradient(circle at 50% 0%, rgba(30, 41, 59, 0.35) 0%, transparent 70%);
+    }
+    .glass-panel {
+      background: linear-gradient(145deg, rgba(21, 30, 50, 0.88), rgba(15, 23, 42, 0.94));
+      border: 1px solid rgba(51, 65, 85, 0.65);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(8px);
+    }
+    .glow-ok { box-shadow: 0 0 24px rgba(16, 185, 129, 0.12); }
+    .glow-fail { box-shadow: 0 0 24px rgba(239, 68, 68, 0.12); }
+    .glow-blue { box-shadow: 0 0 24px rgba(59, 130, 246, 0.12); }
+    .glow-amber { box-shadow: 0 0 24px rgba(245, 158, 11, 0.12); }
+    .shift-card-active {
+      border-color: rgba(59, 130, 246, 0.85) !important;
+      box-shadow: 0 0 26px rgba(59, 130, 246, 0.2);
+    }
+
+    /* Custom Scrollbar for Log Table */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between antialiased selection:bg-blue-500 selection:text-white">
+
+  <!-- TOP NAVIGATION BAR -->
+  <nav class="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-2">
+      <!-- Left Brand & Title -->
+      <div class="flex items-center gap-3">
+        <div>
+          <h1 class="font-bold text-slate-100 text-xs sm:text-base leading-tight tracking-wide">
+            FEED MILL — LINE BAGGING 01
+          </h1>
+          <p class="text-[11px] sm:text-xs text-slate-400">Automated Chute QC Sampling SCADA</p>
+        </div>
+      </div>
+
+      <!-- Right Live Clock, Active Shift Indicator & Hardware Connection Status -->
+      <div class="flex items-center gap-2 sm:gap-3.5">
+        <!-- Active Shift Indicator Badge in Header -->
+        <div id="nav-shift-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-500/15 border border-blue-500/40 text-blue-300 text-xs font-bold tracking-wide">
+          <span class="relative flex h-2 w-2">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2 w-2 bg-blue-400"></span>
+          </span>
+          <span id="nav-shift-name">SHIFT 1</span>
+          <span id="nav-shift-hours" class="hidden md:inline text-[11px] font-mono text-slate-400 border-l border-slate-700 pl-2">07:00–15:00 WIB</span>
+        </div>
+
+        <div class="hidden sm:flex flex-col text-right font-mono">
+          <span id="live-clock" class="text-sm font-bold text-slate-100">00:00:00 WIB</span>
+          <span id="live-date" class="text-[11px] text-slate-400">Memuat tanggal...</span>
+        </div>
+
+        <!-- Dynamic 24V Alarm Badge in Navbar (Hidden by default) -->
+        <div id="alarm-24v-nav-badge" class="hidden items-center gap-2 px-3 py-1.5 rounded-full bg-red-600/20 border border-red-500 text-red-300 text-xs font-extrabold tracking-wider animate-pulse shadow-lg shadow-red-600/30">
+          <span class="relative flex h-2.5 w-2.5">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
+          </span>
+          <span id="alarm-24v-nav-text">🚨 ALARM 24V AKTIF</span>
+        </div>
+
+        <!-- Dynamic ESP32 Status Badge (Default: OFFLINE) -->
+        <div id="esp-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold tracking-wide transition-colors duration-300">
+          <span class="relative flex h-2.5 w-2.5">
+            <span id="esp-dot-ping" class="hidden animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span id="esp-dot-core" class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
+          </span>
+          <span id="esp-status-text">ESP32 OFFLINE</span>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- MAIN CONTENT CONTAINER -->
+  <main class="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-grow space-y-6">
+
+    <!-- PANEL STATUS ALARM LAPANGAN (SELALU TAMPIL: AMAN vs PERINGATAN OPERATOR TURUN KE LAPANGAN) -->
+    <section id="alarm-normal-panel" class="glass-panel rounded-2xl p-3.5 sm:p-4 border border-emerald-500/30 bg-emerald-950/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 transition-all duration-300">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-extrabold uppercase tracking-wider">
+              ALARM 24V: STANDBY / NONAKTIF
+            </span>
+            <span class="text-xs text-slate-400 font-mono">Line Bagging 01</span>
+          </div>
+          <p class="text-xs sm:text-sm font-bold text-slate-200 mt-0.5">
+            Kondisi Lapangan Aman — Aliran Corong Sampling Normal (Operator Tidak Perlu Turun ke Lapangan)
+          </p>
+        </div>
+      </div>
+      <span class="text-[11px] font-mono text-emerald-400/90 bg-emerald-950/60 px-3 py-1 rounded-lg border border-emerald-500/20">
+        Strobo &amp; Buzzer 24V: OFF
+      </span>
+    </section>
+
+    <!-- CRITICAL 24V ALARM WARNING BANNER (SHOWN WHEN ALARM IS ACTIVE >= 2x CONSECUTIVE FAILURES) -->
+    <section id="alarm-24v-banner" class="hidden rounded-2xl p-4 sm:p-5 bg-gradient-to-r from-red-950/95 via-red-900/90 to-red-950/95 border-2 border-red-500 shadow-2xl shadow-red-600/30 transition-all duration-300">
+      <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div class="flex items-start sm:items-center gap-4">
+          <div class="w-12 h-12 rounded-xl bg-red-500/20 border border-red-400/50 flex items-center justify-center text-red-300 shrink-0 animate-bounce">
+            <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+            </svg>
+          </div>
+          <div>
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded-md bg-red-500 text-white text-[11px] font-extrabold uppercase tracking-wider animate-pulse">
+                🚨 PERINGATAN DARURAT — ALARM &amp; BUZZER 24V MENYALA!
+              </span>
+              <span id="alarm-streak-badge" class="px-2.5 py-0.5 rounded-md bg-red-950/90 border border-red-400/40 text-red-200 text-xs font-mono font-bold">
+                Gagal Beruntun: 2x
+              </span>
+            </div>
+            <h2 id="alarm-banner-title" class="text-base sm:text-xl font-extrabold text-white mt-1.5 tracking-wide uppercase">
+              ⚠️ OPERATOR HARAP SEGERA TURUN KE LAPANGAN (LINE BAGGING 01)!
+            </h2>
+            <p class="text-xs sm:text-sm text-red-100 mt-1 leading-relaxed">
+              Corong sampling terindikasi <strong>MACET / TERSUMBAT</strong>! Segera turun ke lapangan untuk membersihkan sumbatan pakan pada corong sensor, lalu tekan tombol <strong>RESET MANUAL</strong> di panel alat atau tombol di samping.
+            </p>
+          </div>
+        </div>
+        <button onclick="acknowledgeAlarmOnly()" class="px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white border border-red-400/50 rounded-xl text-xs font-extrabold uppercase tracking-wider shrink-0 shadow-lg shadow-red-950/60 transition cursor-pointer active:scale-95">
+          🔕 Matikan Alarm (Tanpa Hapus Data)
+        </button>
+      </div>
+    </section>
+
+    <!-- SYSTEM STATUS & 3.0-SECOND VALIDATION WINDOW BAR -->
+    <section class="glass-panel rounded-2xl p-4 sm:p-5 flex flex-col lg:flex-row items-center justify-between gap-4 transition-all duration-300" id="status-panel">
+      <div class="flex items-center gap-4 w-full lg:w-auto">
+        <div id="status-icon-box" class="w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0 transition-colors duration-300">
+          <!-- Lightning Bolt Icon -->
+          <svg id="status-svg" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="text-[11px] font-bold uppercase tracking-widest text-slate-400">Status Siklus Mesin</span>
+            <span id="status-shift-pill" class="px-2 py-0.5 rounded bg-blue-500/15 border border-blue-500/30 text-blue-300 font-mono text-[10px] font-bold">
+              Shift 1 Aktif
+            </span>
+          </div>
+          <div id="status-text" class="text-base sm:text-xl font-bold text-blue-400 font-mono mt-0.5">
+            STANDBY — MENUNGGU KELIPATAN 100
+          </div>
+        </div>
+      </div>
+
+      <!-- 3.0s Validation Countdown Bar -->
+      <div class="w-full lg:w-1/2 flex flex-col gap-2">
+        <div class="flex justify-between items-center text-xs font-mono">
+          <span class="text-slate-400">Jendela Validasi Proximity (3.0s)</span>
+          <span id="timer-countdown" class="text-slate-200 font-bold bg-slate-800/80 px-2 py-0.5 rounded border border-slate-700">0.0s / 3.0s</span>
+        </div>
+        <div class="w-full bg-slate-900/90 rounded-full h-3.5 overflow-hidden border border-slate-700/80 p-0.5">
+          <div id="validation-bar" class="bg-blue-500 h-full rounded-full transition-all duration-75 ease-linear" style="width: 0%"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 KPI METRIC CARDS GRID (TOTAL KESELURUHAN) -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <!-- KPI 1: Sampling Berhasil -->
+      <div class="glass-panel glow-ok rounded-2xl p-5 border-t-4 border-t-emerald-500 flex flex-col justify-between transition-transform duration-200 hover:-translate-y-0.5">
+        <div class="flex justify-between items-start">
+          <div>
+            <p class="text-xs font-bold uppercase tracking-wider text-emerald-400">Sampling Berhasil</p>
+            <h2 id="val-berhasil" class="text-4xl sm:text-5xl font-extrabold font-mono text-white mt-2 tracking-tight">0</h2>
+          </div>
+          <span class="p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+          </span>
+        </div>
+        <p class="text-xs text-slate-400 mt-4 pt-3 border-t border-slate-800/80">Pelet terdeteksi melintas corong</p>
+      </div>
+
+      <!-- KPI 2: Sampling Gagal -->
+      <div class="glass-panel glow-fail rounded-2xl p-5 border-t-4 border-t-red-500 flex flex-col justify-between transition-transform duration-200 hover:-translate-y-0.5">
+        <div class="flex justify-between items-start">
+          <div>
+            <p class="text-xs font-bold uppercase tracking-wider text-red-400">Sampling Gagal</p>
+            <h2 id="val-gagal" class="text-4xl sm:text-5xl font-extrabold font-mono text-white mt-2 tracking-tight">0</h2>
+          </div>
+          <span class="p-2.5 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+          </span>
+        </div>
+        <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+          <span class="text-slate-400">Timeout 3s / Tersumbat</span>
+          <span id="streak-gagal-pill" class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono font-semibold text-[11px] border border-slate-700">
+            Beruntun: <span id="val-gagal-beruntun">0</span>/2
+          </span>
+        </div>
+      </div>
+
+      <!-- KPI 3: Total Siklus (x100) -->
+      <div class="glass-panel glow-blue rounded-2xl p-5 border-t-4 border-t-blue-500 flex flex-col justify-between transition-transform duration-200 hover:-translate-y-0.5">
+        <div class="flex justify-between items-start">
+          <div>
+            <p class="text-xs font-bold uppercase tracking-wider text-blue-400">Total Siklus (x100)</p>
+            <h2 id="val-total" class="text-4xl sm:text-5xl font-extrabold font-mono text-white mt-2 tracking-tight">0</h2>
+          </div>
+          <span class="p-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl text-blue-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+          </span>
+        </div>
+        <p class="text-xs text-slate-400 mt-4 pt-3 border-t border-slate-800/80">
+          Estimasi produksi: <span id="est-karung" class="text-slate-200 font-mono font-bold">0</span> karung
+        </p>
+      </div>
+
+      <!-- KPI 4: Keandalan Sampling -->
+      <div class="glass-panel glow-amber rounded-2xl p-5 border-t-4 border-t-amber-500 flex flex-col justify-between transition-transform duration-200 hover:-translate-y-0.5">
+        <div class="flex justify-between items-start">
+          <div>
+            <p class="text-xs font-bold uppercase tracking-wider text-amber-400">Keandalan Sampling</p>
+            <h2 id="val-rate" class="text-4xl sm:text-5xl font-extrabold font-mono text-white mt-2 tracking-tight">0.0%</h2>
+          </div>
+          <span class="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-400">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+            </svg>
+          </span>
+        </div>
+        <p class="text-xs text-slate-400 mt-4 pt-3 border-t border-slate-800/80">Target standar QC: &ge; 98.0%</p>
+      </div>
+    </section>
+
+    <!-- REKAPITULASI MONITORING 3 SHIFT KERJA (WIB / ASIA/JAKARTA) -->
+    <section class="glass-panel rounded-2xl p-5 space-y-4">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+        <div>
+          <h3 class="text-sm font-bold uppercase tracking-wider text-slate-100 flex items-center gap-2">
+            <span>Rekapitulasi Performa 3 Shift Kerja (WIB)</span>
+          </h3>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Pemisahan otomatis statistik sampling Berhasil, Gagal, dan Keandalan berdasarkan jam operasional pabrik
+          </p>
+        </div>
+        <div class="flex items-center gap-2 text-xs font-mono">
+          <span class="text-slate-400">Shift Aktif Saat Ini:</span>
+          <span id="summary-active-shift" class="px-2.5 py-1 rounded-lg bg-blue-500/20 border border-blue-500/40 text-blue-300 font-bold">
+            Shift 1 (07:00 - 15:00 WIB)
+          </span>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- Card Shift 1 -->
+        <div id="card-shift-1" class="rounded-xl p-4 bg-slate-900/75 border border-slate-800 transition-all duration-300 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-blue-400" id="dot-shift-1"></span>
+                <h4 class="font-bold text-sm text-white uppercase tracking-wide">Shift 1 (Pagi)</h4>
+              </div>
+              <span id="badge-shift-1" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                07:00 – 15:00
+              </span>
+            </div>
+
+            <div class="grid grid-cols-3 gap-2 my-3.5 text-center font-mono">
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-emerald-500/20">
+                <div class="text-[10px] uppercase text-emerald-400 font-sans font-bold">Berhasil</div>
+                <div id="s1-berhasil" class="text-xl font-extrabold text-white mt-0.5">0</div>
+              </div>
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-red-500/20">
+                <div class="text-[10px] uppercase text-red-400 font-sans font-bold">Gagal</div>
+                <div id="s1-gagal" class="text-xl font-extrabold text-white mt-0.5">0</div>
+              </div>
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-amber-500/20">
+                <div class="text-[10px] uppercase text-amber-400 font-sans font-bold">Keandalan</div>
+                <div id="s1-rate" class="text-xl font-extrabold text-white mt-0.5">0.0%</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-1.5 pt-2 border-t border-slate-800/80 text-[11px] font-mono">
+            <div class="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+              <div id="s1-bar" class="bg-emerald-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-slate-400">
+              <span>Total: <strong id="s1-total" class="text-slate-200">0</strong> siklus</span>
+              <span>Est: <strong id="s1-karung" class="text-slate-200">0</strong> karung</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card Shift 2 -->
+        <div id="card-shift-2" class="rounded-xl p-4 bg-slate-900/75 border border-slate-800 transition-all duration-300 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-slate-600" id="dot-shift-2"></span>
+                <h4 class="font-bold text-sm text-white uppercase tracking-wide">Shift 2 (Sore)</h4>
+              </div>
+              <span id="badge-shift-2" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                15:00 – 23:00
+              </span>
+            </div>
+
+            <div class="grid grid-cols-3 gap-2 my-3.5 text-center font-mono">
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-emerald-500/20">
+                <div class="text-[10px] uppercase text-emerald-400 font-sans font-bold">Berhasil</div>
+                <div id="s2-berhasil" class="text-xl font-extrabold text-white mt-0.5">0</div>
+              </div>
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-red-500/20">
+                <div class="text-[10px] uppercase text-red-400 font-sans font-bold">Gagal</div>
+                <div id="s2-gagal" class="text-xl font-extrabold text-white mt-0.5">0</div>
+              </div>
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-amber-500/20">
+                <div class="text-[10px] uppercase text-amber-400 font-sans font-bold">Keandalan</div>
+                <div id="s2-rate" class="text-xl font-extrabold text-white mt-0.5">0.0%</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-1.5 pt-2 border-t border-slate-800/80 text-[11px] font-mono">
+            <div class="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+              <div id="s2-bar" class="bg-emerald-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-slate-400">
+              <span>Total: <strong id="s2-total" class="text-slate-200">0</strong> siklus</span>
+              <span>Est: <strong id="s2-karung" class="text-slate-200">0</strong> karung</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card Shift 3 -->
+        <div id="card-shift-3" class="rounded-xl p-4 bg-slate-900/75 border border-slate-800 transition-all duration-300 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-slate-600" id="dot-shift-3"></span>
+                <h4 class="font-bold text-sm text-white uppercase tracking-wide">Shift 3 (Malam)</h4>
+              </div>
+              <span id="badge-shift-3" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                23:00 – 07:00
+              </span>
+            </div>
+
+            <div class="grid grid-cols-3 gap-2 my-3.5 text-center font-mono">
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-emerald-500/20">
+                <div class="text-[10px] uppercase text-emerald-400 font-sans font-bold">Berhasil</div>
+                <div id="s3-berhasil" class="text-xl font-extrabold text-white mt-0.5">0</div>
+              </div>
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-red-500/20">
+                <div class="text-[10px] uppercase text-red-400 font-sans font-bold">Gagal</div>
+                <div id="s3-gagal" class="text-xl font-extrabold text-white mt-0.5">0</div>
+              </div>
+              <div class="bg-slate-950/70 rounded-lg p-2.5 border border-amber-500/20">
+                <div class="text-[10px] uppercase text-amber-400 font-sans font-bold">Keandalan</div>
+                <div id="s3-rate" class="text-xl font-extrabold text-white mt-0.5">0.0%</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-1.5 pt-2 border-t border-slate-800/80 text-[11px] font-mono">
+            <div class="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+              <div id="s3-bar" class="bg-emerald-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-slate-400">
+              <span>Total: <strong id="s3-total" class="text-slate-200">0</strong> siklus</span>
+              <span>Est: <strong id="s3-karung" class="text-slate-200">0</strong> karung</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MIDDLE SECTION: DOUGHNUT CHART (1/3) & LIVE LOG TABLE (2/3) -->
+    <section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Left Panel: Doughnut Chart -->
+      <div class="glass-panel rounded-2xl p-5 flex flex-col justify-between">
+        <div>
+          <h3 class="text-sm font-bold uppercase tracking-wider text-slate-200">Rasio Keberhasilan QC</h3>
+          <p class="text-xs text-slate-400 mt-0.5">Perbandingan sampel berhasil vs gagal/macet</p>
+        </div>
+
+        <div class="relative h-56 w-full my-4 flex items-center justify-center">
+          <canvas id="qcChart"></canvas>
+          <!-- Center Chart Overlay -->
+          <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none pb-6">
+            <span class="text-[10px] uppercase tracking-widest text-slate-400 font-semibold">Total</span>
+            <span id="chart-center-total" class="text-2xl font-extrabold font-mono text-white">0</span>
+          </div>
+        </div>
+
+        <div class="pt-3 border-t border-slate-800 flex justify-between items-center text-xs text-slate-400 font-mono">
+          <span>Sensor: Proximity Kapasitif</span>
+          <span class="text-slate-300">Window: 3000 ms</span>
+        </div>
+      </div>
+
+      <!-- Right Panel: Live Log Table -->
+      <div class="glass-panel rounded-2xl p-5 lg:col-span-2 flex flex-col">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+          <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-200">Log Aktivitas Sampling Real-Time</h3>
+            <p class="text-xs text-slate-400 mt-0.5">Rekaman histori setiap siklus kelipatan 100 karung beserta Shift kerja</p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <button onclick="exportCSV()" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer active:scale-95">
+              <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+              </svg>
+              Export CSV
+            </button>
+            <button onclick="openResetModal()" class="px-3.5 py-2 bg-red-500/10 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer active:scale-95">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+              </svg>
+              Reset Data
+            </button>
+          </div>
+        </div>
+
+        <!-- Shift Log Filter Tabs -->
+        <div class="flex flex-wrap items-center gap-1.5 mb-3">
+          <button onclick="setLogShiftFilter('ALL')" id="tab-filter-all" class="px-3 py-1 rounded-lg text-xs font-semibold bg-blue-600 text-white transition cursor-pointer">
+            Semua Shift
+          </button>
+          <button onclick="setLogShiftFilter('Shift 1')" id="tab-filter-s1" class="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition cursor-pointer">
+            Shift 1 (07:00–15:00)
+          </button>
+          <button onclick="setLogShiftFilter('Shift 2')" id="tab-filter-s2" class="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition cursor-pointer">
+            Shift 2 (15:00–23:00)
+          </button>
+          <button onclick="setLogShiftFilter('Shift 3')" id="tab-filter-s3" class="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition cursor-pointer">
+            Shift 3 (23:00–07:00)
+          </button>
+        </div>
+
+        <div class="overflow-x-auto flex-grow max-h-64 overflow-y-auto rounded-xl border border-slate-800/90 bg-slate-950/40">
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="bg-slate-900/95 text-slate-400 text-[11px] uppercase tracking-wider border-b border-slate-800 sticky top-0 z-10">
+                <th class="py-3 px-4">Waktu (WIB)</th>
+                <th class="py-3 px-4">Shift</th>
+                <th class="py-3 px-4">Siklus Ke-</th>
+                <th class="py-3 px-4">Respon Sensor</th>
+                <th class="py-3 px-4">Status Validasi</th>
+              </tr>
+            </thead>
+            <tbody id="log-table-body" class="divide-y divide-slate-800/60 text-xs font-mono">
+              <tr id="empty-row">
+                <td colspan="5" class="py-10 text-center text-slate-500 font-sans">
+                  Belum ada aktivitas sampling pada sesi ini. Menunggu sinyal dari ESP32 atau gunakan panel simulasi di bawah.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- BOTTOM INTERACTIVE SIMULATION SANDBOX PANEL -->
+    <section class="rounded-2xl border border-dashed border-amber-500/40 bg-amber-500/5 p-4 sm:p-5 flex flex-col lg:flex-row items-center justify-between gap-4">
+      <div class="flex items-start sm:items-center gap-3">
+        <span class="px-2.5 py-1 bg-amber-500/20 border border-amber-500/30 text-amber-400 rounded-lg text-xs font-bold uppercase tracking-wider shrink-0">
+          Mode Simulasi
+        </span>
+        <p class="text-xs text-slate-300 leading-relaxed">
+          Uji alur siklus 100 karung, pembagian 3 shift otomatis, dan jendela deteksi sensor 3.0 detik secara interaktif.
+        </p>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2.5 w-full lg:w-auto justify-end">
+        <button id="btn-sim-trigger" onclick="startSimulationCycle()" class="flex-1 sm:flex-none px-4 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-600/20 transition cursor-pointer active:scale-95">
+          ▶ Trigger Mesin (100 Karung)
+        </button>
+        <button id="btn-sim-pass" onclick="triggerSensorPass()" disabled class="flex-1 sm:flex-none px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-lg shadow-emerald-600/20 transition cursor-pointer active:scale-95">
+          ✓ Pakan Lewat (Sukses)
+        </button>
+        <button id="btn-sim-fail" onclick="triggerImmediateFail()" class="flex-1 sm:flex-none px-4 py-2.5 bg-red-600/90 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-lg shadow-red-600/20 transition cursor-pointer active:scale-95">
+          ✕ Simulasi Macet (Gagal)
+        </button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- CUSTOM TOAST NOTIFICATION BANNER -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- POP-UP MODAL PEMBERITAHUAN ALARM OPERATOR TURUN KE LAPANGAN -->
+  <div id="alarm-5x-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 backdrop-blur-md p-4">
+    <div class="rounded-2xl max-w-lg w-full p-6 bg-gradient-to-b from-red-950 via-slate-900 to-slate-950 border-2 border-red-500 shadow-2xl shadow-red-600/40 transform transition-all">
+      <div class="flex items-center gap-4 text-red-400 mb-4">
+        <div class="p-3 bg-red-500/20 rounded-2xl border border-red-500/50 animate-bounce shrink-0">
+          <svg class="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+          </svg>
+        </div>
+        <div>
+          <span class="px-2.5 py-0.5 rounded bg-red-600 text-white text-[11px] font-extrabold uppercase tracking-wider animate-pulse">
+            🚨 ALARM &amp; BUZZER 24V MENYALA
+          </span>
+          <h3 class="text-xl font-extrabold text-white mt-1 uppercase">
+            Operator Harap Segera Turun ke Lapangan!
+          </h3>
+        </div>
+      </div>
+      <div class="rounded-xl bg-red-950/60 border border-red-500/40 p-4 mb-5 space-y-2.5">
+        <p class="text-sm font-bold text-red-200">
+          Terjadi kegagalan sampling (<span id="modal-streak-count" class="text-white underline font-mono">2</span>x berturut-turut) — Corong Sampling Line Bagging 01 terindikasi <strong>MACET / TERSUMBAT</strong>!
+        </p>
+        <div class="text-xs text-red-200/95 leading-relaxed space-y-1 bg-black/30 p-3 rounded-lg border border-red-500/30">
+          <div class="font-extrabold text-amber-300 uppercase tracking-wide mb-1">📋 Instruksi Tindakan Operator:</div>
+          <div>1. <strong>Segera turun ke lapangan</strong> (Area Mesin Line Bagging 01).</div>
+          <div>2. Periksa dan bersihkan sumbatan pakan/pelet pada jalur corong sensor proximity.</div>
+          <div>3. Tekan tombol fisik <strong>RESET MANUAL</strong> pada box panel ESP32 (atau tombol Matikan Alarm di bawah) untuk mematikan Sirine/Buzzer 24V.</div>
+        </div>
+      </div>
+      <div class="flex flex-wrap justify-end gap-3">
+        <button onclick="dismissAlarm5xModal()" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition cursor-pointer">
+          Tutup Popup Saja
+        </button>
+        <button onclick="acknowledgeAlarmOnly()" class="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold shadow-lg shadow-red-600/30 transition cursor-pointer">
+          🔕 Matikan Alarm (Tanpa Hapus Data)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CUSTOM CONFIRMATION MODAL FOR RESET DATA -->
+  <div id="reset-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <div class="glass-panel rounded-2xl max-w-md w-full p-6 border border-slate-700 shadow-2xl transform transition-all">
+      <div class="flex items-center gap-3 text-red-400 mb-3">
+        <div class="p-2.5 bg-red-500/10 rounded-xl border border-red-500/30">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+          </svg>
+        </div>
+        <h3 class="text-lg font-bold text-white">Konfirmasi Reset Data</h3>
+      </div>
+      <p class="text-sm text-slate-300 leading-relaxed mb-6">
+        Apakah Anda yakin ingin mereset seluruh counter sampling (Berhasil, Gagal, Rekap 3 Shift) serta menghapus tabel riwayat log sesi ini?
+      </p>
+      <div class="flex justify-end gap-3">
+        <button onclick="closeResetModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition cursor-pointer">
+          Batal
+        </button>
+        <button onclick="confirmResetData()" class="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold shadow-lg shadow-red-600/25 transition cursor-pointer">
+          Ya, Reset Semua Data
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT LOGIC -->
+  <script>
+    // ================= STATE VARIABLES =================
+    const IS_LOCAL_HOST = ['localhost', '127.0.0.1'].includes(window.location.hostname) || window.location.protocol === 'file:';
+    const IS_CLOUD_WEB = !IS_LOCAL_HOST;
+    const API_BASE = (IS_LOCAL_HOST && (window.location.protocol === 'file:' || (window.location.port && window.location.port !== '5000')))
+      ? 'http://localhost:5000'
+      : '';
+    const STORAGE_KEY = 'otomatisasi_sampling_scada_3shift_state_v1';
+
+    let flaskAvailable = false;
+    let directEspOnline = false;
+    let lastDirectEspActivity = 0;
+    let directUsesHeartbeat = false;
+    let lastRawEspBerhasil = null;
+    let lastRawEspGagal = null;
+
+    let countBerhasil = 0;
+    let countGagal = 0;
+    let gagalBeruntun = 0;
+    let alarmModalDismissedForStreak = false;
+    let currentShiftFilter = 'ALL';
+
+    function createEmptyShifts() {
+      return {
+        'Shift 1': { berhasil: 0, gagal: 0, jam: '07:00 - 15:00 WIB' },
+        'Shift 2': { berhasil: 0, gagal: 0, jam: '15:00 - 23:00 WIB' },
+        'Shift 3': { berhasil: 0, gagal: 0, jam: '23:00 - 07:00 WIB' }
+      };
+    }
+
+    let shiftsData = createEmptyShifts();
+    let activeShiftName = 'Shift 1';
+    let activeShiftHours = '07:00 - 15:00 WIB';
+    let logs = [];
+    let lastLogsSignature = '';
+    let lastBackendStatus = '';
+    let isValidating = false;
+    let isBackendAnimating = false;
+    let backendAnimInterval = null;
+    let validationInterval = null;
+    let resetTimeoutId = null;
+    let elapsedMs = 0;
+    const WINDOW_MS = 3000;
+    const MAX_LOGS = 100;
+    const BATAS_GAGAL_ALARM = 2;
+
+    // ================= PENENTUAN SHIFT AKTIF OTOMATIS (WIB / ASIA/JAKARTA) =================
+    function getWibDateParts() {
+      const now = new Date();
+      try {
+        const fmt = new Intl.DateTimeFormat('id-ID', {
+          timeZone: 'Asia/Jakarta',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+        const timeStr = fmt.format(now).replace(/\./g, ':');
+        const hour = parseInt(timeStr.slice(0, 2), 10);
+        const dateStr = now.toLocaleDateString('id-ID', {
+          timeZone: 'Asia/Jakarta',
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric'
+        });
+        return { hour: isNaN(hour) ? now.getHours() : hour, timeStr, dateStr };
+      } catch (e) {
+        const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+        const wibDate = new Date(utcMs + (7 * 3600000));
+        const hour = wibDate.getHours();
+        const timeStr = wibDate.toTimeString().slice(0, 8);
+        const dateStr = wibDate.toLocaleDateString('id-ID', {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric'
+        });
+        return { hour, timeStr, dateStr };
+      }
+    }
+
+    function detectCurrentShiftWIB() {
+      const { hour } = getWibDateParts();
+      if (hour >= 7 && hour < 15) {
+        return { name: 'Shift 1', hours: '07:00 - 15:00 WIB', shortHours: '07:00–15:00 WIB' };
+      } else if (hour >= 15 && hour < 23) {
+        return { name: 'Shift 2', hours: '15:00 - 23:00 WIB', shortHours: '15:00–23:00 WIB' };
+      } else {
+        return { name: 'Shift 3', hours: '23:00 - 07:00 WIB', shortHours: '23:00–07:00 WIB' };
+      }
+    }
+
+    // ================= SIMPAN & MUAT CACHE LOCALSTORAGE (UNTUK VERCEL / SERVERLESS) =================
+    function saveLocalStateCache() {
+      try {
+        const payload = {
+          berhasil: countBerhasil,
+          gagal: countGagal,
+          gagal_beruntun: gagalBeruntun,
+          shifts: shiftsData,
+          logs: logs.slice(0, MAX_LOGS)
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch (e) {}
+    }
+
+    function loadLocalStateCache() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return;
+        countBerhasil = Number(parsed.berhasil) || 0;
+        countGagal = Number(parsed.gagal) || 0;
+        gagalBeruntun = Number(parsed.gagal_beruntun) || 0;
+        if (parsed.shifts && typeof parsed.shifts === 'object') {
+          ['Shift 1', 'Shift 2', 'Shift 3'].forEach(k => {
+            if (parsed.shifts[k]) {
+              shiftsData[k].berhasil = Number(parsed.shifts[k].berhasil) || 0;
+              shiftsData[k].gagal = Number(parsed.shifts[k].gagal) || 0;
+            }
+          });
+        }
+        if (Array.isArray(parsed.logs)) {
+          logs = parsed.logs.slice(0, MAX_LOGS);
+          lastLogsSignature = JSON.stringify(logs);
+        }
+      } catch (e) {}
+    }
+
+    // ================= INITIALIZE DOUGHNUT CHART =================
+    const ctx = document.getElementById('qcChart').getContext('2d');
+    const qcChart = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Sampling Berhasil', 'Sampling Gagal / Macet'],
+        datasets: [{
+          data: [1, 0],
+          backgroundColor: ['#1e293b', '#1e293b'],
+          borderColor: '#151e32',
+          borderWidth: 4,
+          hoverOffset: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '74%',
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: {
+              color: '#94a3b8',
+              padding: 16,
+              usePointStyle: true,
+              pointStyle: 'circle',
+              font: { family: 'Inter', size: 12, weight: '500' }
+            }
+          },
+          tooltip: {
+            enabled: false
+          }
+        }
+      }
+    });
+
+    // ================= LIVE DIGITAL CLOCK, DATE & ACTIVE SHIFT UPDATER =================
+    function updateClockAndShift() {
+      const { timeStr, dateStr } = getWibDateParts();
+      document.getElementById('live-clock').innerText = timeStr + ' WIB';
+      document.getElementById('live-date').innerText = dateStr;
+
+      const shiftInfo = detectCurrentShiftWIB();
+      activeShiftName = shiftInfo.name;
+      activeShiftHours = shiftInfo.hours;
+      updateShiftCardsUI();
+    }
+
+    function updateShiftCardsUI() {
+      const shiftInfo = detectCurrentShiftWIB();
+      const currentShift = activeShiftName || shiftInfo.name;
+
+      // Update Header & Status Bar Shift Indicator
+      document.getElementById('nav-shift-name').innerText = currentShift.toUpperCase() + ' AKTIF';
+      document.getElementById('nav-shift-hours').innerText = shiftInfo.shortHours;
+      document.getElementById('status-shift-pill').innerText = `${currentShift} Aktif`;
+      document.getElementById('summary-active-shift').innerText = `${currentShift} (${activeShiftHours || shiftInfo.hours})`;
+
+      // Update masing-masing kartu Shift 1, Shift 2, Shift 3
+      const shiftMeta = [
+        { key: 'Shift 1', idx: '1', defaultTime: '07:00 – 15:00' },
+        { key: 'Shift 2', idx: '2', defaultTime: '15:00 – 23:00' },
+        { key: 'Shift 3', idx: '3', defaultTime: '23:00 – 07:00' }
+      ];
+
+      shiftMeta.forEach(({ key, idx, defaultTime }) => {
+        const sObj = shiftsData[key] || { berhasil: 0, gagal: 0 };
+        const b = Number(sObj.berhasil) || 0;
+        const g = Number(sObj.gagal) || 0;
+        const tot = b + g;
+        const rateNum = tot > 0 ? ((b / tot) * 100) : 0;
+        const rateStr = rateNum.toFixed(1) + '%';
+
+        document.getElementById(`s${idx}-berhasil`).innerText = b;
+        document.getElementById(`s${idx}-gagal`).innerText = g;
+        document.getElementById(`s${idx}-rate`).innerText = rateStr;
+        document.getElementById(`s${idx}-total`).innerText = tot;
+        document.getElementById(`s${idx}-karung`).innerText = (tot * 100).toLocaleString('id-ID');
+        document.getElementById(`s${idx}-bar`).style.width = (tot > 0 ? rateNum : 0) + '%';
+
+        const card = document.getElementById(`card-shift-${idx}`);
+        const badge = document.getElementById(`badge-shift-${idx}`);
+        const dot = document.getElementById(`dot-shift-${idx}`);
+
+        if (currentShift === key) {
+          card.classList.add('shift-card-active');
+          badge.className = "px-2 py-0.5 rounded text-[10px] font-mono font-extrabold bg-blue-500/20 text-blue-300 border border-blue-500/40";
+          badge.innerText = `● AKTIF (${defaultTime})`;
+          dot.className = "w-2.5 h-2.5 rounded-full bg-blue-400 animate-pulse";
+        } else {
+          card.classList.remove('shift-card-active');
+          badge.className = "px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-400 border border-slate-700";
+          badge.innerText = defaultTime;
+          dot.className = "w-2.5 h-2.5 rounded-full bg-slate-600";
+        }
+      });
+    }
+
+    // ================= UPDATE ESP32 ONLINE/OFFLINE BADGE =================
+    function updateEspConnectionBadge(isOnline) {
+      const badge = document.getElementById('esp-badge');
+      const dotPing = document.getElementById('esp-dot-ping');
+      const dotCore = document.getElementById('esp-dot-core');
+      const statusText = document.getElementById('esp-status-text');
+
+      if (isOnline) {
+        badge.className = "flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold tracking-wide transition-colors duration-300";
+        dotPing.classList.remove('hidden');
+        dotCore.className = "relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500";
+        statusText.innerText = "ESP32 ONLINE";
+      } else {
+        badge.className = "flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold tracking-wide transition-colors duration-300";
+        dotPing.classList.add('hidden');
+        dotCore.className = "relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500";
+        statusText.innerText = "ESP32 OFFLINE";
+      }
+    }
+
+    // ================= UPDATE PERINGATAN ALARM GAGAL BERUNTUN =================
+    function computeConsecutiveFailuresFromLogs(logList) {
+      if (!Array.isArray(logList) || logList.length === 0) return 0;
+      let streak = 0;
+      for (const item of logList) {
+        const st = String(item.status || '').toUpperCase();
+        if (st.includes('GAGAL') || st.includes('MACET') || st.includes('ALARM')) {
+          streak++;
+        } else {
+          break;
+        }
+      }
+      return streak;
+    }
+
+    function dismissAlarm5xModal() {
+      const modal = document.getElementById('alarm-5x-modal');
+      if (modal) {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+      }
+      alarmModalDismissedForStreak = true;
+    }
+
+    // Matikan alarm saja di web TANPA menghapus data counter maupun tabel log
+    async function acknowledgeAlarmOnly() {
+      dismissAlarm5xModal();
+      stopBackendValidationAnimation();
+      if (resetTimeoutId) clearTimeout(resetTimeoutId);
+
+      gagalBeruntun = 0;
+      alarmModalDismissedForStreak = false;
+      lastBackendStatus = 'STANDBY — MENUNGGU KELIPATAN 100';
+
+      document.getElementById('validation-bar').style.width = '0%';
+      document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+      setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+      updateConsecutiveAlarmUI(0, lastBackendStatus);
+      saveLocalStateCache();
+
+      if (!IS_CLOUD_WEB) {
+        try {
+          await fetch(`${API_BASE}/api/ack_alarm`, { method: 'POST', cache: 'no-store' });
+        } catch (err) {}
+      }
+
+      showToast('Alarm berhasil dimatikan. Data counter, rekap shift & riwayat log tetap tersimpan.', 'info');
+    }
+
+    function updateConsecutiveAlarmUI(streakCount, statusStr = '') {
+      const normalPanel = document.getElementById('alarm-normal-panel');
+      const banner = document.getElementById('alarm-24v-banner');
+      const navBadge = document.getElementById('alarm-24v-nav-badge');
+      const navText = document.getElementById('alarm-24v-nav-text');
+      const streakBadge = document.getElementById('alarm-streak-badge');
+      const valStreak = document.getElementById('val-gagal-beruntun');
+      const streakPill = document.getElementById('streak-gagal-pill');
+      const statusPanel = document.getElementById('status-panel');
+      const modal5x = document.getElementById('alarm-5x-modal');
+      const modalStreakCount = document.getElementById('modal-streak-count');
+
+      const upper = String(statusStr || '').toUpperCase();
+      const isResetOrOk = (
+        upper.includes('SAMPLE TERDETEKSI')
+        || upper.includes('OK')
+        || upper.includes('RESET')
+      );
+
+      // Hanya aktifkan Pop-up & Banner Darurat Alarm 24V jika gagal berturut-turut sudah mencapai >= 2x (BATAS_GAGAL_ALARM)
+      const alarmActive = !isResetOrOk && (streakCount >= BATAS_GAGAL_ALARM);
+      const displayStreak = streakCount > 0 ? streakCount : 0;
+
+      if (valStreak) valStreak.innerText = displayStreak;
+
+      if (streakPill) {
+        if (alarmActive) {
+          streakPill.className = "px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-mono font-bold text-[11px] border border-red-500/50 animate-pulse";
+        } else if (displayStreak > 0) {
+          streakPill.className = "px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 font-mono font-semibold text-[11px] border border-amber-500/30";
+        } else {
+          streakPill.className = "px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono font-semibold text-[11px] border border-slate-700";
+        }
+      }
+
+      if (alarmActive) {
+        if (normalPanel) normalPanel.classList.add('hidden');
+        banner.classList.remove('hidden');
+        navBadge.classList.remove('hidden');
+        navBadge.classList.add('flex');
+        streakBadge.innerText = `Gagal Beruntun: ${displayStreak}x`;
+        navText.innerText = `🚨 ALARM 24V AKTIF — TURUN KE LAPANGAN!`;
+        statusPanel.classList.add('border-red-500/80', 'glow-fail');
+        if (modalStreakCount) modalStreakCount.innerText = displayStreak;
+
+        if (modal5x && !alarmModalDismissedForStreak) {
+          modal5x.classList.remove('hidden');
+          modal5x.classList.add('flex');
+        }
+      } else {
+        if (normalPanel) normalPanel.classList.remove('hidden');
+        banner.classList.add('hidden');
+        navBadge.classList.add('hidden');
+        navBadge.classList.remove('flex');
+        statusPanel.classList.remove('border-red-500/80', 'glow-fail');
+        alarmModalDismissedForStreak = false;
+        if (modal5x) {
+          modal5x.classList.add('hidden');
+          modal5x.classList.remove('flex');
+        }
+      }
+    }
+
+    // ================= CUSTOM TOAST NOTIFICATION =================
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+
+      const colors = {
+        info: 'bg-slate-800 border-blue-500/40 text-blue-200',
+        success: 'bg-slate-900 border-emerald-500/50 text-emerald-300',
+        error: 'bg-slate-900 border-red-500/50 text-red-300'
+      };
+
+      toast.className = `px-4 py-3 rounded-xl border shadow-xl text-xs font-semibold flex items-center gap-2.5 transform transition-all duration-300 translate-y-2 opacity-0 ${colors[type] || colors.info}`;
+      toast.innerHTML = `<span>${message}</span>`;
+
+      container.appendChild(toast);
+      requestAnimationFrame(() => {
+        toast.classList.remove('translate-y-2', 'opacity-0');
+      });
+
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-y-2');
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+
+    // ================= REFRESH KPI METRICS, SHIFT CARDS & CHART =================
+    function refreshUI() {
+      const total = countBerhasil + countGagal;
+      const rate = total > 0 ? ((countBerhasil / total) * 100).toFixed(1) : "0.0";
+
+      document.getElementById('val-berhasil').innerText = countBerhasil;
+      document.getElementById('val-gagal').innerText = countGagal;
+      document.getElementById('val-total').innerText = total;
+      document.getElementById('chart-center-total').innerText = total;
+      document.getElementById('est-karung').innerText = (total * 100).toLocaleString('id-ID');
+      document.getElementById('val-rate').innerText = rate + "%";
+
+      if (total === 0) {
+        qcChart.data.datasets[0].data = [1, 0];
+        qcChart.data.datasets[0].backgroundColor = ['#1e293b', '#1e293b'];
+        qcChart.options.plugins.tooltip.enabled = false;
+      } else {
+        qcChart.data.datasets[0].data = [countBerhasil, countGagal];
+        qcChart.data.datasets[0].backgroundColor = ['#10b981', '#ef4444'];
+        qcChart.options.plugins.tooltip.enabled = true;
+      }
+      qcChart.update();
+      updateShiftCardsUI();
+    }
+
+    // ================= FILTER & RENDER LOG TABLE (WITH SHIFT BADGE) =================
+    function setLogShiftFilter(filterName) {
+      currentShiftFilter = filterName;
+      const tabs = [
+        { id: 'tab-filter-all', key: 'ALL' },
+        { id: 'tab-filter-s1', key: 'Shift 1' },
+        { id: 'tab-filter-s2', key: 'Shift 2' },
+        { id: 'tab-filter-s3', key: 'Shift 3' }
+      ];
+      tabs.forEach(t => {
+        const btn = document.getElementById(t.id);
+        if (!btn) return;
+        if (t.key === filterName) {
+          btn.className = "px-3 py-1 rounded-lg text-xs font-semibold bg-blue-600 text-white transition cursor-pointer";
+        } else {
+          btn.className = "px-3 py-1 rounded-lg text-xs font-semibold bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition cursor-pointer";
+        }
+      });
+      renderLogTable();
+    }
+
+    function getShiftBadgeHtml(shiftStr) {
+      const s = shiftStr || 'Shift 1';
+      if (s === 'Shift 1') {
+        return '<span class="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-bold text-[10px]">SHIFT 1</span>';
+      } else if (s === 'Shift 2') {
+        return '<span class="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-bold text-[10px]">SHIFT 2</span>';
+      } else {
+        return '<span class="px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 font-bold text-[10px]">SHIFT 3</span>';
+      }
+    }
+
+    function renderLogTable() {
+      const tbody = document.getElementById('log-table-body');
+      const filteredLogs = currentShiftFilter === 'ALL'
+        ? logs
+        : logs.filter(item => (item.shift || 'Shift 1') === currentShiftFilter);
+
+      if (!filteredLogs || filteredLogs.length === 0) {
+        tbody.innerHTML = `
+          <tr id="empty-row">
+            <td colspan="5" class="py-10 text-center text-slate-500 font-sans">
+              ${currentShiftFilter === 'ALL'
+                ? 'Belum ada aktivitas sampling pada sesi ini. Menunggu sinyal dari ESP32 atau gunakan panel simulasi di bawah.'
+                : `Belum ada rekaman aktivitas sampling pada ${currentShiftFilter}.`}
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = filteredLogs.map(item => {
+        const isSuccess = item.status === 'BERHASIL';
+        const shiftLabel = item.shift || 'Shift 1';
+        return `
+          <tr class="hover:bg-slate-800/40 transition-colors">
+            <td class="py-3 px-4 text-slate-300 whitespace-nowrap">${item.waktu}</td>
+            <td class="py-3 px-4 whitespace-nowrap">${getShiftBadgeHtml(shiftLabel)}</td>
+            <td class="py-3 px-4 text-slate-100 font-semibold whitespace-nowrap">${item.siklus}</td>
+            <td class="py-3 px-4 text-slate-400 whitespace-nowrap">${item.respon}</td>
+            <td class="py-3 px-4 whitespace-nowrap">
+              ${isSuccess
+                ? '<span class="px-2.5 py-1 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold text-[10px] tracking-wider">SUKSES — OK</span>'
+                : '<span class="px-2.5 py-1 rounded-md bg-red-500/15 text-red-400 border border-red-500/30 font-bold text-[10px] tracking-wider">GAGAL / ALARM</span>'}
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    // ================= ADD ROW TO REAL-TIME LOG TABLE =================
+    function addLogEntry(isSuccess, durationSec, customRespon = null, shiftOverride = null) {
+      const { timeStr } = getWibDateParts();
+      const shiftInfo = detectCurrentShiftWIB();
+      const shiftLabel = shiftOverride || activeShiftName || shiftInfo.name;
+      const cycleNum = countBerhasil + countGagal;
+
+      logs.unshift({
+        waktu: timeStr,
+        shift: shiftLabel,
+        siklus: `#${cycleNum} (${(cycleNum * 100).toLocaleString('id-ID')} Karung)`,
+        respon: customRespon || (isSuccess ? `${durationSec} detik (Terdeteksi)` : '3.00 detik (Timeout)'),
+        status: isSuccess ? 'BERHASIL' : 'GAGAL / MACET'
+      });
+
+      if (logs.length > MAX_LOGS) {
+        logs = logs.slice(0, MAX_LOGS);
+      }
+
+      lastLogsSignature = JSON.stringify(logs);
+      renderLogTable();
+      saveLocalStateCache();
+    }
+
+    // ================= UPDATE STATUS BANNER & ICON =================
+    function setStatusBanner(state, text) {
+      const statusText = document.getElementById('status-text');
+      const iconBox = document.getElementById('status-icon-box');
+      const bar = document.getElementById('validation-bar');
+      const svg = document.getElementById('status-svg');
+
+      if (state === 'STANDBY') {
+        statusText.className = "text-base sm:text-xl font-bold text-blue-400 font-mono mt-0.5";
+        iconBox.className = "w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0";
+        bar.className = "bg-blue-500 h-full rounded-full transition-all duration-75 ease-linear";
+        svg.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>';
+      } else if (state === 'VALIDATING') {
+        statusText.className = "text-base sm:text-xl font-bold text-amber-400 font-mono mt-0.5 animate-pulse";
+        iconBox.className = "w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0";
+        bar.className = "bg-amber-500 h-full rounded-full transition-all duration-75 ease-linear";
+        svg.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>';
+      } else if (state === 'OK') {
+        statusText.className = "text-base sm:text-xl font-bold text-emerald-400 font-mono mt-0.5";
+        iconBox.className = "w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0";
+        bar.className = "bg-emerald-500 h-full rounded-full transition-all duration-75 ease-linear";
+        svg.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>';
+      } else if (state === 'FAIL') {
+        statusText.className = "text-base sm:text-xl font-bold text-red-400 font-mono mt-0.5";
+        iconBox.className = "w-12 h-12 rounded-xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-400 shrink-0";
+        bar.className = "bg-red-500 h-full rounded-full transition-all duration-75 ease-linear";
+        svg.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>';
+      }
+      statusText.innerText = text;
+    }
+
+    // ================= ANIMASI JENDELA VALIDASI PROXIMITY 3.0 DETIK =================
+    function stopBackendValidationAnimation() {
+      if (backendAnimInterval) {
+        clearInterval(backendAnimInterval);
+        backendAnimInterval = null;
+      }
+      isBackendAnimating = false;
+    }
+
+    function animateBackendValidationWindow(mode, finalStatusText, cycleTotal, currentStreak) {
+      stopBackendValidationAnimation();
+      if (resetTimeoutId) clearTimeout(resetTimeoutId);
+
+      isBackendAnimating = true;
+      let animElapsed = 0;
+      const targetMs = mode === 'OK' ? 850 : WINDOW_MS;
+
+      setStatusBanner('VALIDATING', 'VALIDASI SENSOR PROXIMITY (3.0s)...');
+      document.getElementById('validation-bar').style.width = '0%';
+      document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+
+      backendAnimInterval = setInterval(() => {
+        animElapsed += 50;
+        const displayMs = Math.min(animElapsed, WINDOW_MS);
+        const pct = Math.min((displayMs / WINDOW_MS) * 100, 100);
+
+        document.getElementById('validation-bar').style.width = pct + '%';
+        document.getElementById('timer-countdown').innerText = (displayMs / 1000).toFixed(1) + 's / 3.0s';
+
+        if (mode === 'VALIDATING' && animElapsed >= WINDOW_MS) {
+          stopBackendValidationAnimation();
+          return;
+        }
+
+        if (animElapsed >= targetMs) {
+          stopBackendValidationAnimation();
+
+          if (mode === 'OK') {
+            const detSec = (displayMs / 1000).toFixed(1);
+            setStatusBanner('OK', finalStatusText || 'SAMPLE TERDETEKSI — OK!');
+            document.getElementById('validation-bar').style.width = '100%';
+            document.getElementById('timer-countdown').innerText = `${detSec}s / 3.0s (OK)`;
+            updateConsecutiveAlarmUI(0, finalStatusText || 'SAMPLE TERDETEKSI — OK!');
+            showToast(`[${activeShiftName}] Siklus #${cycleTotal} Berhasil (${detSec}s — Terdeteksi ESP32)`, 'success');
+
+            resetTimeoutId = setTimeout(() => {
+              if (!isValidating && !isBackendAnimating) {
+                document.getElementById('validation-bar').style.width = '0%';
+                document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+                setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+              }
+            }, 2200);
+          } else if (mode === 'FAIL') {
+            document.getElementById('validation-bar').style.width = '100%';
+            document.getElementById('timer-countdown').innerText = '3.0s / 3.0s';
+            const isAlarmActive = currentStreak >= BATAS_GAGAL_ALARM;
+            const alarmLabel = isAlarmActive
+              ? `ALARM 24V AKTIF: ${currentStreak}x GAGAL BERTURUT-TURUT — CORONG MACET!`
+              : `GAGAL (${currentStreak}/${BATAS_GAGAL_ALARM}) — TIMEOUT 3.0s`;
+            setStatusBanner('FAIL', alarmLabel);
+            updateConsecutiveAlarmUI(currentStreak, alarmLabel);
+            showToast(
+              isAlarmActive
+                ? `🚨 ALARM 24V MENYALA (${currentStreak}x Gagal)! Operator Harap Segera Turun ke Lapangan!`
+                : `[${activeShiftName}] Siklus #${cycleTotal} Gagal (${currentStreak}/${BATAS_GAGAL_ALARM}) — Belum mencapai batas alarm`,
+              'error'
+            );
+
+            if (!isAlarmActive) {
+              resetTimeoutId = setTimeout(() => {
+                if (!isValidating && !isBackendAnimating && gagalBeruntun < BATAS_GAGAL_ALARM) {
+                  document.getElementById('validation-bar').style.width = '0%';
+                  document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+                  setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+                }
+              }, 2500);
+            }
+          }
+        }
+      }, 50);
+    }
+
+    // ================= KONEKSI LANGSUNG KE HIVEMQ CLOUD VIA WEBSOCKET (UNTUK VERCEL & WEB) =================
+    const HIVEMQ_WS_URL = 'wss://311c949a8e4d44afb405b9efa6f0a4e4.s1.eu.hivemq.cloud:8884/mqtt';
+    const MQTT_TOPIC = 'otomatisasi_sampling/qc/sampling';
+    const MQTT_STATUS_TOPIC = 'otomatisasi_sampling/qc/status';
+
+    function initDirectMqttWebSocket() {
+      if (typeof mqtt === 'undefined') return;
+
+      const clientId = 'otomatisasi_sampling_web_' + Math.random().toString(16).substring(2, 10);
+      const client = mqtt.connect(HIVEMQ_WS_URL, {
+        clientId: clientId,
+        username: 'otomatisasi_sampling',
+        password: 'sampling123',
+        clean: true,
+        reconnectPeriod: 3000,
+        connectTimeout: 10000
+      });
+
+      client.on('connect', () => {
+        console.log('[HiveMQ WebSocket] Terhubung langsung ke HiveMQ Cloud!');
+        client.subscribe([MQTT_TOPIC, MQTT_STATUS_TOPIC]);
+      });
+
+      client.on('message', (topic, messageBuffer, packet) => {
+        const rawText = messageBuffer.toString().trim();
+
+        if (topic === MQTT_STATUS_TOPIC) {
+          if (['OFFLINE', '0', 'DISCONNECTED'].includes(rawText.toUpperCase())) {
+            directEspOnline = false;
+            lastDirectEspActivity = 0;
+            if (!flaskAvailable) updateEspConnectionBadge(false);
+          } else {
+            directEspOnline = true;
+            lastDirectEspActivity = Date.now();
+            updateEspConnectionBadge(true);
+          }
+          return;
+        }
+
+        // Tandai ESP32 ONLINE
+        directEspOnline = true;
+        lastDirectEspActivity = Date.now();
+        updateEspConnectionBadge(true);
+
+        if (flaskAvailable) return; // Saat Flask lokal aktif, data siklus disinkronkan dari /api/data
+
+        if (packet && packet.retain) {
+          try {
+            const retainedPayload = JSON.parse(rawText);
+            if (retainedPayload && typeof retainedPayload === 'object') {
+              if ('berhasil' in retainedPayload && lastRawEspBerhasil === null) {
+                lastRawEspBerhasil = Number(retainedPayload.berhasil) || 0;
+                if (countBerhasil === 0) countBerhasil = lastRawEspBerhasil;
+              }
+              if ('gagal' in retainedPayload && lastRawEspGagal === null) {
+                lastRawEspGagal = Number(retainedPayload.gagal) || 0;
+                if (countGagal === 0) countGagal = lastRawEspGagal;
+              }
+              refreshUI();
+            }
+          } catch (e) {}
+          return;
+        }
+
+        const upperRaw = rawText.toUpperCase();
+        if (['PING', 'HEARTBEAT', 'ONLINE'].includes(upperRaw)) {
+          directUsesHeartbeat = true;
+          return;
+        }
+        if (['OFFLINE', 'DISCONNECTED'].includes(upperRaw)) {
+          directEspOnline = false;
+          updateEspConnectionBadge(false);
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(rawText);
+          if (!payload || typeof payload !== 'object') return;
+
+          const inBerhasil = 'berhasil' in payload ? Number(payload.berhasil) : null;
+          const inGagal = 'gagal' in payload ? Number(payload.gagal) : null;
+
+          const isHeartbeat = (
+            payload.heartbeat === true
+            || [1, 'true', 'True', '1'].includes(payload.heartbeat)
+            || String(payload.type || '').toLowerCase() === 'heartbeat'
+            || ['HEARTBEAT', 'PING', 'ONLINE'].includes(String(payload.status || '').toUpperCase())
+          );
+
+          if (isHeartbeat) {
+            directUsesHeartbeat = true;
+            if (lastRawEspBerhasil === null && inBerhasil !== null) {
+              lastRawEspBerhasil = inBerhasil;
+            }
+            if (lastRawEspGagal === null && inGagal !== null) {
+              lastRawEspGagal = inGagal;
+            }
+            return;
+          }
+
+          const shiftInfo = detectCurrentShiftWIB();
+          activeShiftName = shiftInfo.name;
+          activeShiftHours = shiftInfo.hours;
+
+          const rawStatus = String(payload.status || '').trim();
+          const upperStatus = rawStatus.toUpperCase();
+
+          if (upperStatus.includes('RESET')) {
+            gagalBeruntun = 0;
+            if (inBerhasil !== null) lastRawEspBerhasil = inBerhasil;
+            if (inGagal !== null) lastRawEspGagal = inGagal;
+            stopBackendValidationAnimation();
+            setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+            document.getElementById('validation-bar').style.width = '0%';
+            document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+            updateConsecutiveAlarmUI(0, 'STANDBY — MENUNGGU KELIPATAN 100');
+            saveLocalStateCache();
+            refreshUI();
+            return;
+          }
+
+          if (['STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100'].includes(upperStatus)) {
+            if (gagalBeruntun < BATAS_GAGAL_ALARM) {
+              setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+            }
+            return;
+          }
+
+          const isSuccessEvent = (
+            ['SAMPLE TERDETEKSI', 'OK', 'BERHASIL', 'SAMPLE TERDETEKSI — OK!'].includes(upperStatus)
+            || upperStatus.includes('TERDETEKSI')
+            || upperStatus.includes('BERHASIL')
+          );
+          const isFailEvent = (
+            ['GAGAL', 'MACET', 'TIMEOUT', 'GAGAL / MACET'].includes(upperStatus)
+            || upperStatus.includes('GAGAL')
+            || upperStatus.includes('MACET')
+            || upperStatus.includes('TIMEOUT')
+            || upperStatus.includes('ALARM')
+          );
+
+          let shouldLog = false;
+          let deltaB = 0;
+          let deltaG = 0;
+
+          if (inBerhasil !== null || inGagal !== null) {
+            const curB = inBerhasil !== null ? inBerhasil : countBerhasil;
+            const curG = inGagal !== null ? inGagal : countGagal;
+
+            if (lastRawEspBerhasil === null) {
+              shouldLog = (curB + curG) > 0;
+              deltaB = (isSuccessEvent && shouldLog) ? 1 : 0;
+              deltaG = (isFailEvent && shouldLog) ? 1 : 0;
+            } else if (curB !== lastRawEspBerhasil || curG !== (lastRawEspGagal || 0)) {
+              shouldLog = (curB + curG) > 0;
+              if (curB > lastRawEspBerhasil) deltaB = curB - lastRawEspBerhasil;
+              else if (isSuccessEvent && shouldLog) deltaB = 1;
+
+              if (curG > (lastRawEspGagal || 0)) deltaG = curG - (lastRawEspGagal || 0);
+              else if (isFailEvent && shouldLog) deltaG = 1;
+            }
+
+            lastRawEspBerhasil = curB;
+            lastRawEspGagal = curG;
+            countBerhasil = curB;
+            countGagal = curG;
+          } else {
+            if (isSuccessEvent) {
+              countBerhasil++;
+              shouldLog = true;
+              deltaB = 1;
+            } else if (isFailEvent) {
+              countGagal++;
+              shouldLog = true;
+              deltaG = 1;
+            }
+          }
+
+          const cycleNum = countBerhasil + countGagal;
+
+          if (isSuccessEvent) {
+            gagalBeruntun = 0;
+            if (shouldLog && cycleNum > 0) {
+              shiftsData[activeShiftName].berhasil += Math.max(1, deltaB);
+              refreshUI();
+              addLogEntry(true, '0.85', 'Terdeteksi ESP32', activeShiftName);
+              animateBackendValidationWindow('OK', 'SAMPLE TERDETEKSI — OK!', cycleNum, 0);
+            }
+          } else if (isFailEvent) {
+            if ('gagal_beruntun' in payload) {
+              gagalBeruntun = Number(payload.gagal_beruntun) || 0;
+            } else if (shouldLog && cycleNum > 0) {
+              gagalBeruntun += 1;
+            }
+            if (shouldLog && cycleNum > 0) {
+              shiftsData[activeShiftName].gagal += Math.max(1, deltaG);
+              refreshUI();
+              addLogEntry(false, '3.00', `Timeout (>3.0s) — Gagal Beruntun ${gagalBeruntun}/${BATAS_GAGAL_ALARM}`, activeShiftName);
+              const failStatus = gagalBeruntun >= BATAS_GAGAL_ALARM
+                ? `ALARM 24V AKTIF: ${gagalBeruntun}x GAGAL BERTURUT-TURUT — CORONG MACET!`
+                : `GAGAL (${gagalBeruntun}/${BATAS_GAGAL_ALARM}) — TIMEOUT 3.0s`;
+              animateBackendValidationWindow('FAIL', failStatus, cycleNum, gagalBeruntun);
+            }
+          }
+        } catch (err) {
+          console.error('[HiveMQ WebSocket JSON Error]:', err);
+        }
+      });
+
+      setInterval(() => {
+        if (!flaskAvailable && directUsesHeartbeat && lastDirectEspActivity > 0) {
+          if (Date.now() - lastDirectEspActivity > 15000) {
+            directEspOnline = false;
+            updateEspConnectionBadge(false);
+          }
+        }
+      }, 2000);
+    }
+
+    // ================= POLLING DATA DARI FLASK BACKEND (/api/data) =================
+    async function fetchBackendState() {
+      if (IS_CLOUD_WEB) return;
+
+      try {
+        const res = await fetch(`${API_BASE}/api/data`, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP error');
+        const data = await res.json();
+        flaskAvailable = true;
+
+        updateEspConnectionBadge(Boolean(data.esp_online) || directEspOnline);
+
+        if (data.shift_aktif) activeShiftName = data.shift_aktif;
+        if (data.jam_shift_aktif) activeShiftHours = data.jam_shift_aktif;
+        if (data.shifts && typeof data.shifts === 'object') {
+          ['Shift 1', 'Shift 2', 'Shift 3'].forEach(k => {
+            if (data.shifts[k]) {
+              shiftsData[k].berhasil = Number(data.shifts[k].berhasil) || 0;
+              shiftsData[k].gagal = Number(data.shifts[k].gagal) || 0;
+            }
+          });
+        }
+
+        if (!isValidating) {
+          const prevBerhasil = countBerhasil;
+          const prevGagal = countGagal;
+          const prevTotal = prevBerhasil + prevGagal;
+
+          const newBerhasil = Number(data.berhasil) || 0;
+          const newGagal = Number(data.gagal) || 0;
+          const newTotal = newBerhasil + newGagal;
+
+          countBerhasil = newBerhasil;
+          countGagal = newGagal;
+          refreshUI();
+
+          if (Array.isArray(data.logs)) {
+            const sig = JSON.stringify(data.logs);
+            if (sig !== lastLogsSignature) {
+              lastLogsSignature = sig;
+              logs = data.logs;
+              renderLogTable();
+              saveLocalStateCache();
+            }
+          }
+
+          const backendStatus = (data.status || 'STANDBY — MENUNGGU KELIPATAN 100').toUpperCase();
+          if (typeof data.gagal_beruntun === 'number') {
+            gagalBeruntun = data.gagal_beruntun;
+          } else {
+            gagalBeruntun = computeConsecutiveFailuresFromLogs(logs);
+          }
+
+          if (
+            backendStatus.includes('SAMPLE TERDETEKSI')
+            || backendStatus.includes('OK')
+            || backendStatus.includes('RESET')
+          ) {
+            gagalBeruntun = 0;
+          }
+
+          if (!isBackendAnimating) {
+            updateConsecutiveAlarmUI(gagalBeruntun, data.status || '');
+          }
+
+          const isNewCycle = newTotal > prevTotal;
+          const isStatusChanged = data.status && data.status !== lastBackendStatus;
+
+          if (isNewCycle || isStatusChanged) {
+            lastBackendStatus = data.status || '';
+
+            if (backendStatus.includes('VALIDASI') || backendStatus.includes('SAMPLING')) {
+              animateBackendValidationWindow('VALIDATING', data.status, newTotal, gagalBeruntun);
+            } else if (newBerhasil > prevBerhasil || (isStatusChanged && (backendStatus.includes('OK') || backendStatus.includes('TERDETEKSI')))) {
+              if (isNewCycle) {
+                animateBackendValidationWindow('OK', data.status || 'SAMPLE TERDETEKSI — OK!', newTotal, 0);
+              } else if (!isBackendAnimating) {
+                setStatusBanner('OK', data.status || 'SAMPLE TERDETEKSI — OK!');
+              }
+            } else if (newGagal > prevGagal || (isStatusChanged && (backendStatus.includes('ALARM') || backendStatus.includes('MACET') || backendStatus.includes('GAGAL')))) {
+              if (isNewCycle) {
+                animateBackendValidationWindow('FAIL', data.status, newTotal, gagalBeruntun);
+              } else if (!isBackendAnimating) {
+                const isAlarm24v = gagalBeruntun >= BATAS_GAGAL_ALARM;
+                const alarmLabel = isAlarm24v
+                  ? `ALARM 24V AKTIF: ${gagalBeruntun}x GAGAL BERUNTUN — CORONG MACET!`
+                  : `GAGAL (${gagalBeruntun}/${BATAS_GAGAL_ALARM}) — TIMEOUT 3.0s`;
+                setStatusBanner('FAIL', alarmLabel);
+                document.getElementById('validation-bar').style.width = '100%';
+                document.getElementById('timer-countdown').innerText = '3.0s / 3.0s';
+                updateConsecutiveAlarmUI(gagalBeruntun, alarmLabel);
+              }
+            } else if (!isBackendAnimating) {
+              if (resetTimeoutId) clearTimeout(resetTimeoutId);
+              setStatusBanner('STANDBY', data.status || 'STANDBY — MENUNGGU KELIPATAN 100');
+              document.getElementById('validation-bar').style.width = '0%';
+              document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+              updateConsecutiveAlarmUI(gagalBeruntun, data.status || '');
+            }
+          }
+        }
+      } catch (err) {
+        flaskAvailable = false;
+        if (!directEspOnline) {
+          updateEspConnectionBadge(false);
+        }
+      }
+    }
+
+    // ================= SIMULATION SANDBOX CONTROLS =================
+    function startSimulationCycle(forceTimeoutFail = false) {
+      if (isValidating) return;
+      stopBackendValidationAnimation();
+      if (resetTimeoutId) clearTimeout(resetTimeoutId);
+
+      isValidating = true;
+      elapsedMs = 0;
+
+      document.getElementById('btn-sim-trigger').disabled = true;
+      document.getElementById('btn-sim-pass').disabled = forceTimeoutFail;
+      document.getElementById('btn-sim-fail').disabled = true;
+      setStatusBanner('VALIDATING', 'VALIDASI SENSOR PROXIMITY...');
+
+      validationInterval = setInterval(() => {
+        elapsedMs += 50;
+        const pct = Math.min((elapsedMs / WINDOW_MS) * 100, 100);
+        document.getElementById('validation-bar').style.width = pct + '%';
+        document.getElementById('timer-countdown').innerText = (elapsedMs / 1000).toFixed(1) + 's / 3.0s';
+
+        if (elapsedMs >= WINDOW_MS) {
+          finishCycle(false);
+        }
+      }, 50);
+    }
+
+    function triggerSensorPass() {
+      if (!isValidating) return;
+      finishCycle(true);
+    }
+
+    function triggerImmediateFail() {
+      if (isValidating) {
+        document.getElementById('btn-sim-pass').disabled = true;
+        document.getElementById('btn-sim-fail').disabled = true;
+      } else {
+        startSimulationCycle(true);
+      }
+    }
+
+    function finishCycle(isSuccess) {
+      if (validationInterval) clearInterval(validationInterval);
+      isValidating = false;
+
+      document.getElementById('btn-sim-pass').disabled = true;
+      document.getElementById('btn-sim-trigger').disabled = true;
+      document.getElementById('btn-sim-fail').disabled = true;
+      const durationSec = Math.max(0.15, elapsedMs / 1000).toFixed(2);
+
+      const shiftInfo = detectCurrentShiftWIB();
+      activeShiftName = shiftInfo.name;
+      activeShiftHours = shiftInfo.hours;
+
+      if (isSuccess) {
+        countBerhasil++;
+        gagalBeruntun = 0;
+        shiftsData[activeShiftName].berhasil++;
+        setStatusBanner('OK', 'SAMPLE TERDETEKSI — OK!');
+        showToast(`[${activeShiftName}] Siklus #${countBerhasil + countGagal} Berhasil (${durationSec}s)`, 'success');
+      } else {
+        countGagal++;
+        gagalBeruntun++;
+        shiftsData[activeShiftName].gagal++;
+        const failBannerText = gagalBeruntun >= BATAS_GAGAL_ALARM
+          ? `ALARM 24V AKTIF: ${gagalBeruntun}x GAGAL BERUNTUN — CORONG MACET!`
+          : `GAGAL (${gagalBeruntun}/${BATAS_GAGAL_ALARM}) — TIMEOUT 3.0s`;
+        setStatusBanner('FAIL', failBannerText);
+        showToast(
+          gagalBeruntun >= BATAS_GAGAL_ALARM
+            ? `🚨 ALARM 24V MENYALA (${gagalBeruntun}x Gagal)! Operator Harap Segera Turun ke Lapangan!`
+            : `[${activeShiftName}] Siklus #${countBerhasil + countGagal} Gagal (${gagalBeruntun}/${BATAS_GAGAL_ALARM})`,
+          'error'
+        );
+      }
+
+      addLogEntry(isSuccess, durationSec, null, activeShiftName);
+      refreshUI();
+      lastBackendStatus = isSuccess
+        ? 'SAMPLE TERDETEKSI — OK!'
+        : (gagalBeruntun >= BATAS_GAGAL_ALARM ? `ALARM 24V AKTIF: ${gagalBeruntun}x GAGAL BERUNTUN — CORONG MACET!` : `GAGAL (${gagalBeruntun}/${BATAS_GAGAL_ALARM}) — TIMEOUT 3.0s`);
+      updateConsecutiveAlarmUI(gagalBeruntun, lastBackendStatus);
+      syncToBackend(lastBackendStatus);
+
+      resetTimeoutId = setTimeout(() => {
+        if (gagalBeruntun < BATAS_GAGAL_ALARM) {
+          document.getElementById('validation-bar').style.width = '0%';
+          document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+          setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+        }
+        document.getElementById('btn-sim-trigger').disabled = false;
+        document.getElementById('btn-sim-fail').disabled = false;
+      }, 1800);
+    }
+
+    // ================= OPTIONAL BACKEND SYNC (SAFE TRY/CATCH) =================
+    async function syncToBackend(statusStr) {
+      saveLocalStateCache();
+      if (IS_CLOUD_WEB) return;
+      try {
+        await fetch(`${API_BASE}/api/update`, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            berhasil: countBerhasil,
+            gagal: countGagal,
+            gagal_beruntun: gagalBeruntun,
+            status: statusStr,
+            shifts: shiftsData,
+            logs: logs
+          })
+        });
+      } catch (err) {}
+    }
+
+    // ================= RESET DATA MODAL HANDLERS =================
+    function openResetModal() {
+      const modal = document.getElementById('reset-modal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeResetModal() {
+      const modal = document.getElementById('reset-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    async function confirmResetData() {
+      closeResetModal();
+      stopBackendValidationAnimation();
+      if (validationInterval) clearInterval(validationInterval);
+      if (resetTimeoutId) clearTimeout(resetTimeoutId);
+      isValidating = false;
+
+      if (!IS_CLOUD_WEB) {
+        try {
+          await fetch(`${API_BASE}/api/reset`, { method: 'POST', cache: 'no-store' });
+        } catch (err) {}
+      }
+
+      countBerhasil = 0;
+      countGagal = 0;
+      gagalBeruntun = 0;
+      lastRawEspBerhasil = 0;
+      lastRawEspGagal = 0;
+      shiftsData = createEmptyShifts();
+      logs = [];
+      lastLogsSignature = JSON.stringify([]);
+      lastBackendStatus = 'STANDBY — MENUNGGU KELIPATAN 100';
+      try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+
+      document.getElementById('validation-bar').style.width = '0%';
+      document.getElementById('timer-countdown').innerText = '0.0s / 3.0s';
+      document.getElementById('btn-sim-trigger').disabled = false;
+      document.getElementById('btn-sim-pass').disabled = true;
+      document.getElementById('btn-sim-fail').disabled = false;
+      setStatusBanner('STANDBY', 'STANDBY — MENUNGGU KELIPATAN 100');
+      updateConsecutiveAlarmUI(0, lastBackendStatus);
+
+      renderLogTable();
+      refreshUI();
+      showToast('Seluruh data counter, rekap 3 shift & riwayat log berhasil di-reset.', 'info');
+    }
+
+    // ================= EXPORT LOG TO CSV =================
+    function exportCSV() {
+      if (logs.length === 0) {
+        showToast('Belum ada data log untuk diunduh.', 'error');
+        return;
+      }
+
+      let csvContent = "data:text/csv;charset=utf-8,Waktu (WIB),Shift,Siklus Ke-,Respon Sensor,Status Validasi\n";
+      logs.forEach(row => {
+        const shiftCol = row.shift || 'Shift 1';
+        csvContent += `"${row.waktu}","${shiftCol}","${row.siklus}","${row.respon}","${row.status}"\n`;
+      });
+
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", `Laporan_QC_Sampling_3Shift_${dateStamp}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      showToast('Laporan CSV (3 Shift) berhasil diunduh.', 'success');
+    }
+
+    // ================= INITIALIZATION =================
+    loadLocalStateCache();
+    setInterval(updateClockAndShift, 1000);
+    updateClockAndShift();
+    renderLogTable();
+    refreshUI();
+    initDirectMqttWebSocket();
+
+    if (!IS_CLOUD_WEB) {
+      setInterval(fetchBackendState, 1500);
+      fetchBackendState();
+    }
+  </script>
+</body>
+</html>
