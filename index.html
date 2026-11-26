@@ -1226,9 +1226,14 @@
     }
 
     // ================= KONEKSI LANGSUNG KE HIVEMQ CLOUD VIA WEBSOCKET (UNTUK VERCEL & WEB) =================
-    const HIVEMQ_WS_URL = 'wss://311c949a8e4d44afb405b9efa6f0a4e4.s1.eu.hivemq.cloud:8884/mqtt';
-    const MQTT_TOPIC = 'otomatisasi_sampling/qc/sampling';
-    const MQTT_STATUS_TOPIC = 'otomatisasi_sampling/qc/status';
+    const HIVEMQ_BROKER_ID = '311c949a8e4d44afb405b9efa6f0a4e4';
+    const HIVEMQ_HOST = `${HIVEMQ_BROKER_ID}.s1.eu.hivemq.cloud`;
+    const HIVEMQ_WS_PORT = 8884;
+    const HIVEMQ_WS_URL = `wss://${HIVEMQ_HOST}:${HIVEMQ_WS_PORT}/mqtt`;
+    const MQTT_USERNAME = 'otomatis_sampling';
+    const MQTT_PASSWORD = 'sampling123';
+    const MQTT_TOPIC = 'otomatis_sampling/qc/sampling';
+    const MQTT_STATUS_TOPIC = 'otomatis_sampling/qc/status';
 
     function initDirectMqttWebSocket() {
       if (typeof mqtt === 'undefined') return;
@@ -1236,8 +1241,8 @@
       const clientId = 'otomatisasi_sampling_web_' + Math.random().toString(16).substring(2, 10);
       const client = mqtt.connect(HIVEMQ_WS_URL, {
         clientId: clientId,
-        username: 'otomatisasi_sampling',
-        password: 'sampling123',
+        username: MQTT_USERNAME,
+        password: MQTT_PASSWORD,
         clean: true,
         reconnectPeriod: 3000,
         connectTimeout: 10000

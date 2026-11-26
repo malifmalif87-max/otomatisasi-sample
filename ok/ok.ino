@@ -11,9 +11,9 @@ const char* password      = "azov5127";
 
 const char* mqtt_server   = "311c949a8e4d44afb405b9efa6f0a4e4.s1.eu.hivemq.cloud";
 const int   mqtt_port     = 8883;
-const char* mqtt_user     = "otomatisasi_sampling";
+const char* mqtt_user     = "otomatis_sampling";
 const char* mqtt_password = "sampling123";
-const char* mqtt_topic    = "otomatisasi_sampling/qc/sampling";
+const char* mqtt_topic    = "otomatis_sampling/qc/sampling";
 
 // ================= PIN HARDWARE =================
 #define TFT_CS          15

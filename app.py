@@ -111,12 +111,15 @@ def load_state_cache():
 load_state_cache()
 
 # ================= KONFIGURASI HIVEMQ =================
-MQTT_BROKER = "311c949a8e4d44afb405b9efa6f0a4e4.s1.eu.hivemq.cloud"
-MQTT_PORT = 8883
-MQTT_USER = "otomatisasi_sampling"
-MQTT_PASS = "sampling123"
-MQTT_TOPIC = "otomatisasi_sampling/qc/sampling"
-MQTT_STATUS_TOPIC = "otomatisasi_sampling/qc/status"
+MQTT_BROKER_ID = os.environ.get("MQTT_BROKER_ID", "311c949a8e4d44afb405b9efa6f0a4e4")
+MQTT_BROKER = os.environ.get("MQTT_HOST", f"{MQTT_BROKER_ID}.s1.eu.hivemq.cloud")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
+MQTT_WS_PORT = int(os.environ.get("MQTT_WS_PORT", "8884"))
+MQTT_WS_URL = os.environ.get("MQTT_WS_URL", f"wss://{MQTT_BROKER}:{MQTT_WS_PORT}/mqtt")
+MQTT_USER = os.environ.get("MQTT_USERNAME", "otomatis_sampling")
+MQTT_PASS = os.environ.get("MQTT_PASSWORD", "sampling123")
+MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "otomatis_sampling/qc/sampling")
+MQTT_STATUS_TOPIC = os.environ.get("MQTT_STATUS_TOPIC", "otomatis_sampling/qc/status")
 
 # ================= CALLBACK MQTT =================
 def on_connect(client, userdata, flags, rc):
@@ -140,7 +143,7 @@ def on_message(client, userdata, msg):
     global last_esp_activity, esp_uses_heartbeat, last_raw_berhasil, last_raw_gagal
     raw_text = msg.payload.decode(errors="ignore").strip()
 
-    # 1. Jika pesan masuk dari topik status/heartbeat khusus (otomatisasi_sampling/qc/status)
+    # 1. Jika pesan masuk dari topik status/heartbeat khusus (MQTT_STATUS_TOPIC)
     if msg.topic == MQTT_STATUS_TOPIC:
         with state_lock:
             if raw_text.upper() in ["OFFLINE", "0", "DISCONNECTED"]:
