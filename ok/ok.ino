@@ -428,6 +428,7 @@ void loop() {
 
     setAlarm(false);
     perbaruiStatusBawah("BUZZER DIMATIKAN!", WARNA_KUNING);
+    kirimEventSiklus("MUTE");
     resetMessageUntil = now + 1000;
     Serial.println("[MUTE] Alarm dimatikan lewat GPIO 32");
   }
